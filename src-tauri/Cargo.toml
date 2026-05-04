@@ -1,0 +1,22 @@
+[package]
+name = "aura-discord"
+version = "2.9.0"
+description = "Aura Discord - Полноценный Discord-клон с автообновлениями"
+authors = ["Aura Team"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tauri = { version = "2", features = ["tray-icon"] }
+
+[features]
+# this feature is used for production builds or when `devPath` points to the filesystem
+# DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]

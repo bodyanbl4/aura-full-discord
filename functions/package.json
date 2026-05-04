@@ -1,0 +1,19 @@
+{
+  "name": "aura-livekit-functions",
+  "version": "1.0.0",
+  "description": "LiveKit token generation for Aura",
+  "main": "index.js",
+  "scripts": {
+    "serve": "firebase emulators:start --only functions",
+    "deploy": "firebase deploy --only functions"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "firebase-functions": "^4.5.0",
+    "livekit-server-sdk": "^1.2.7",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": "18"
+  }
+}
