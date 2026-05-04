@@ -1,9 +1,9 @@
-const { AccessToken } = require('livekit-server-sdk');
+import { AccessToken } from 'livekit-server-sdk';
 
 const LIVEKIT_API_KEY = 'APIpwGekiRj6WSd';
 const LIVEKIT_API_SECRET = 'IXB2f9Qw3Ie8u2AA74rR4idWRMjVj2YPeIB3lveiUwID';
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   // Enable CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -43,4 +43,4 @@ module.exports = async (req, res) => {
     console.error('Token generation error:', error);
     res.status(500).json({ error: 'Failed to generate token' });
   }
-};
+}
