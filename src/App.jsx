@@ -4,7 +4,8 @@ import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken }
 import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, addDoc, updateDoc, deleteDoc, query, where, arrayUnion, getDocs } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 
-// WebRTC P2P - абсолютно бесплатно, без VPS, без нагрузки на сервер
+// ИМПОРТЫ LIVEKIT
+import { Room, RoomEvent, createLocalTracks } from 'livekit-client';
 
 import {
   AlertTriangle, Zap, Search, Globe, MessageCircle, Phone, PhoneIncoming,
@@ -1191,132 +1192,97 @@ function MainApp() {
     if (!user) return;
     if (groupCall && groupCall.name === roomName) return;
     if (groupCall) await leaveGroupCall(true);
-    
     const callId = `group-${roomName.toLowerCase().replace(/\s+/g, '-')}`;
-    setToast({ name: "Система", text: "Подключение к голосовому чату (WebRTC P2P)...", avatar: "" });
+    
+    setToast({ name: "Система", text: "Подключение к серверу LiveKit...", avatar: "" });
 
     try {
-      // WebRTC P2P - абсолютно бесплатно, без VPS, без нагрузки на сервер
-      const peer = new RTCPeerConnection({
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' }
-        ]
+      // 1. ПОЛУЧАЕМ ТОКЕН ОТ VERCEL С ИСПОЛЬЗОВАНИЕМ ССЫЛКИ ИЗ СКРИНШОТА
+      const tokenResponse = await fetch('https://aura-full-discord-758l-6nrr26gn6-bodyanbl4s-projects.vercel.app/api/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          room: callId,
+          identity: user.username
+        })
       });
 
-      window.groupPeer = peer;
+      if (!tokenResponse.ok) {
+        throw new Error(`Ошибка Vercel API: ${tokenResponse.status}`);
+      }
 
-      // Получаем локальный стрим
-      let localStream;
+      const data = await tokenResponse.json();
+      const token = data.token || data;
+
+      if (!token) throw new Error("Токен не получен");
+
+      // 2. ПОДКЛЮЧЕНИЕ К LIVEKIT
+      const room = new Room();
+      window.livekitRoom = room;
+
+      await room.connect('wss://aura-oau79de6.livekit.cloud', token);
+
+      let tracks;
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        localGroupStreamRef.current = localStream;
-        
-        // Добавляем треки в peer connection
-        localStream.getTracks().forEach(track => {
-          peer.addTrack(track, localStream);
-        });
+        tracks = await createLocalTracks({ audio: true, video: false });
       } catch (e) {
-        if (window.confirm("Не удалось получить доступ к микрофону. Хотите войти в режиме слушателя?")) {
-          localStream = null;
+        if (window.confirm("Не удалось получить доступ к микрофону. Хотите войти в режиме зрителя?")) {
+           tracks = []; // Слушаем без публикации своего звука
         } else {
-          return;
+           room.disconnect();
+           return;
         }
+      }
+
+      if (tracks.length > 0) {
+         await room.localParticipant.publishTracks(tracks);
+         const localStream = new MediaStream();
+         tracks.forEach(t => localStream.addTrack(t.mediaStreamTrack));
+         localGroupStreamRef.current = localStream;
+      } else {
+         localGroupStreamRef.current = null;
       }
 
       setGroupCallMuted(false);
       setGroupCallVideoEnabled(false);
 
-      // Обработка входящих стримов
-      peer.ontrack = (event) => {
-        const [remoteStream] = event.streams;
-        setGroupRemoteStreams(prev => ({
-          ...prev,
-          [event.track.id]: remoteStream
-        }));
-      };
-
-      // ICE candidates через Firebase
-      peer.onicecandidate = async (event) => {
-        if (event.candidate) {
-          const callRef = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, callId);
-          await updateDoc(callRef, {
-            [`candidates.${user.username}`]: arrayUnion(event.candidate.toJSON())
-          }).catch(() => {});
+      // 3. ОБРАБОТКА ВХОДЯЩИХ ПОТОКОВ
+      room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+        if (track.kind === 'audio' || track.kind === 'video') {
+          const remoteStream = new MediaStream([track.mediaStreamTrack]);
+          setGroupRemoteStreams(prev => ({
+            ...prev,
+            [participant.identity]: remoteStream
+          }));
         }
-      };
+      });
 
-      // Создаём offer
-      const offer = await peer.createOffer();
-      await peer.setLocalDescription(offer);
+      room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+        setGroupRemoteStreams(prev => {
+          const newStreams = { ...prev };
+          delete newStreams[participant.identity];
+          return newStreams;
+        });
+      });
 
-      // Сохраняем в Firebase
+      // ОБНОВЛЯЕМ БАЗУ (ЧТОБЫ ДРУГИЕ ВИДЕЛИ В САЙДБАРЕ)
       const callRef = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, callId);
       const snap = await getDoc(callRef);
-      
       let currentParticipants = [];
       if (snap.exists() && snap.data().status === 'active') {
         currentParticipants = snap.data().participants || [];
       }
-      
       if (!currentParticipants.find(p => p.username === user.username)) {
-        currentParticipants.push({ 
-          username: user.username, 
-          name: user.name || user.username, 
-          avatar: user.avatar, 
-          isStreaming: false 
-        });
+        currentParticipants.push({ username: user.username, name: user.name || user.username, avatar: user.avatar, isStreaming: false });
+        await setDoc(callRef, { id: callId, type: 'group', name: roomName, participants: currentParticipants, status: 'active', ts: Date.now(), createdBy: user.username }, { merge: true });
       }
 
-      await setDoc(callRef, { 
-        id: callId, 
-        type: 'group', 
-        name: roomName, 
-        participants: currentParticipants, 
-        status: 'active', 
-        ts: Date.now(), 
-        createdBy: user.username,
-        offer: { type: offer.type, sdp: offer.sdp },
-        candidates: {}
-      }, { merge: true });
-
-      // Слушаем answer и candidates
-      onSnapshot(callRef, async (snapshot) => {
-        const data = snapshot.data();
-        if (!data) return;
-
-        // Получаем answer
-        if (data.answer && !peer.currentRemoteDescription) {
-          await peer.setRemoteDescription(new RTCSessionDescription(data.answer));
-        }
-
-        // Получаем candidates от других участников
-        if (data.candidates) {
-          Object.entries(data.candidates).forEach(([username, candidates]) => {
-            if (username !== user.username && Array.isArray(candidates)) {
-              candidates.forEach(async (candidate) => {
-                try {
-                  await peer.addIceCandidate(new RTCIceCandidate(candidate));
-                } catch (e) {}
-              });
-            }
-          });
-        }
-      });
-
-      setGroupCall({ 
-        id: callId, 
-        name: roomName, 
-        participants: currentParticipants, 
-        status: 'active',
-        peer: peer
-      });
+      setGroupCall({ id: callId, name: roomName, participants: currentParticipants, status: 'active' });
       setIsCallMinimized(false);
       playTone('unmute');
 
     } catch (e) {
-      console.error("WebRTC P2P error:", e);
+      console.error("LiveKit connection error:", e);
       setToast({ name: "Ошибка подключения", text: `${e.message}`, avatar: "" });
     }
   };
@@ -1325,10 +1291,9 @@ function MainApp() {
     if (!groupCall) return;
     playTone('leave');
     
-    // Закрываем WebRTC peer connection
-    if (window.groupPeer) {
-      window.groupPeer.close();
-      window.groupPeer = null;
+    if (window.livekitRoom) {
+      window.livekitRoom.disconnect();
+      window.livekitRoom = null;
     }
 
     if (localGroupStreamRef.current) {
