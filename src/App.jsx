@@ -4,6 +4,9 @@ import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken }
 import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, addDoc, updateDoc, deleteDoc, query, where, arrayUnion, getDocs } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 
+// ИМПОРТЫ LIVEKIT
+import { Room, RoomEvent, createLocalTracks } from 'livekit-client';
+
 import {
   AlertTriangle, Zap, Search, Globe, MessageCircle, Phone, PhoneIncoming,
   PhoneForwarded, PhoneCall, ChevronLeft, Video, Info, Pin, X, Check,
@@ -86,11 +89,6 @@ const safeReaction = (val) => {
   if (typeof val === 'string') return val;
   if (val && typeof val === 'object' && val.reaction) return val.reaction;
   return '';
-};
-
-// ГЕНЕРАТОР УНИКАЛЬНОГО ID ДЛЯ PEERJS (Чтобы звонки работали идеально)
-const getCleanPeerId = (callId, username) => {
-  return `aura-${callId}-${username}`.replace(/[^a-zA-Z0-9-]/g, '').toLowerCase();
 };
 
 const compressImage = (file) => {
@@ -325,14 +323,14 @@ class ErrorBoundary extends React.Component {
   render() {
     if (this.state.hasError) {
       return (
-          <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:'100vh', background:'#050505', color:'white', textAlign:'center', padding: '20px' }}>
-            <AlertTriangle size={64} color="#5865F2" style={{marginBottom: 20}} />
-            <h2 style={{fontSize: 28, fontWeight: 800}}>Сбой компонента</h2>
-            <p style={{opacity: 0.6, marginBottom: 30, maxWidth: 600, wordBreak: 'break-word'}}>
-              {this.state.errorMsg}
-            </p>
-            <button onClick={() => { localStorage.clear(); window.location.reload(); }} style={{padding:'16px 32px', background:'#5865F2', color:'white', borderRadius:20, border:'none', cursor:'pointer', fontWeight: 700}}>Очистить кэш и перезагрузить</button>
-          </div>
+        <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:'100vh', background:'#050505', color:'white', textAlign:'center', padding: '20px' }}>
+          <AlertTriangle size={64} color="#5865F2" style={{marginBottom: 20}} />
+          <h2 style={{fontSize: 28, fontWeight: 800}}>Сбой компонента</h2>
+          <p style={{opacity: 0.6, marginBottom: 30, maxWidth: 600, wordBreak: 'break-word'}}>
+            {this.state.errorMsg}
+          </p>
+          <button onClick={() => { localStorage.clear(); window.location.reload(); }} style={{padding:'16px 32px', background:'#5865F2', color:'white', borderRadius:20, border:'none', cursor:'pointer', fontWeight: 700}}>Очистить кэш и перезагрузить</button>
+        </div>
       );
     }
     return this.props.children;
@@ -347,7 +345,7 @@ const AuraToast = ({ data, onClose, onClick }) => {
     const timer = setTimeout(onClose, 5000);
     return () => clearTimeout(timer);
   }, [onClose]);
-
+  
   return (
       <div className="aura-toast" onClick={onClick}>
         <img src={safeText(data.avatar) || `https://api.dicebear.com/7.x/initials/svg?seed=${safeText(data.name)}`} style={{width:46, height:46, borderRadius:'50%'}} alt="av" />
@@ -363,9 +361,9 @@ const AuraToast = ({ data, onClose, onClick }) => {
 const VideoCirclePlayer = ({ msg }) => {
   const videoRef = useRef(null);
   const [playing, setPlaying] = useState(false);
-
+  
   if (typeof msg.text !== 'string') return <div style={{color:'red', fontSize:12}}>Сбой видео</div>;
-
+  
   return (
       <div className="circle-video" onClick={() => {
         if(!videoRef.current) return;
@@ -382,18 +380,18 @@ const VoicePlayer = ({ src, isMine }) => {
   const audioRef = useRef(null);
   const [playing, setPlaying] = useState(false);
   const [prog, setProg] = useState(0);
-
+  
   if (typeof src !== 'string') return <div style={{color:'red', fontSize:12}}>Сбой аудио</div>;
-
+  
   useEffect(() => {
-    const a = audioRef.current;
+    const a = audioRef.current; 
     if (!a) return;
     const upd = () => setProg((a.currentTime / (a.duration || 1)) * 100);
     a.addEventListener('timeupdate', upd);
     a.addEventListener('ended', () => setPlaying(false));
     return () => { a.removeEventListener('timeupdate', upd); };
   }, []);
-
+  
   return (
       <div className="voice-player">
         <button className="voice-btn" onClick={() => { if(playing) audioRef.current.pause(); else audioRef.current.play(); setPlaying(!playing); }} style={{background: isMine ? 'rgba(255,255,255,0.2)' : 'var(--aura-red)'}}>
@@ -441,7 +439,7 @@ function MainApp() {
   const scrollRef = useRef();
   const messagesEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
-
+  
   const [callSession, setCallSession] = useState(null);
   const [callDuration, setCallDuration] = useState(0);
   const [isCallMinimized, setIsCallMinimized] = useState(false);
@@ -449,34 +447,31 @@ function MainApp() {
   const [selectedDevices, setSelectedDevices] = useState({ audioIn: '', audioOut: '', videoIn: '' });
   const [callState, setCallState] = useState({ micMuted: false, screenShare: false });
   const [remoteStreamConnected, setRemoteStreamConnected] = useState(false);
-  const [currentPing, setCurrentPing] = useState(0);
-
-  const [groupCall, setGroupCall] = useState(null);
-  const [groupConnections, setGroupConnections] = useState({});
-  const [groupRemoteStreams, setGroupRemoteStreams] = useState({});
+  const [currentPing, setCurrentPing] = useState(0); 
+  
+  const [groupCall, setGroupCall] = useState(null); 
+  const [groupConnections, setGroupConnections] = useState({}); 
+  const [groupRemoteStreams, setGroupRemoteStreams] = useState({}); 
   const [groupCallMuted, setGroupCallMuted] = useState(false);
-  const [groupCallVideoEnabled, setGroupCallVideoEnabled] = useState(false);
+  const [groupCallVideoEnabled, setGroupCallVideoEnabled] = useState(false); 
   const localGroupStreamRef = useRef(null);
-  const groupVideoRefs = useRef({});
-  const [speakingUsers, setSpeakingUsers] = useState({});
-
+  const groupVideoRefs = useRef({}); 
+  const [speakingUsers, setSpeakingUsers] = useState({}); 
+  
   const [servers, setServers] = useState([]);
   const [currentServer, setCurrentServer] = useState(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
-
+  
   const pcRef = useRef(null);
   const localStream = useRef(null);
   const remoteVideoRef = useRef(null);
   const localVideoRef = useRef(null);
 
-  // Добавлен для PeerJS
-  const peerInstance = useRef(null);
-
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [showStatusMenu, setShowStatusMenu] = useState(false);
-
+  
   // Глобальные каналы (чтобы показывать кто сидит в сайдбаре)
   const [activeChannels, setActiveChannels] = useState({});
 
@@ -484,25 +479,17 @@ function MainApp() {
     if (!uData || uData.showLastSeen === false) return '#80848e';
     const offlineTime = (typeof uData.status === 'number') ? uData.status : (uData.lastActiveTS || Date.now());
     const diff = Math.floor((Date.now() - offlineTime) / 60000);
-
+    
     if (uData.status === 'dnd') return '#f04747';
     if (uData.status === 'idle' || (diff > 5 && uData.status !== 'dnd' && uData.status !== 'offline')) return '#f0b232';
     if (uData.status === 'offline' || diff > 1440) return '#80848e';
-
+    
     return '#23a559';
   };
 
   useEffect(() => {
-    // Внедрение совершенно бесплатного WebRTC брокера (PeerJS)
-    if (!window.Peer) {
-      const script = document.createElement('script');
-      script.src = 'https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js';
-      script.async = true;
-      document.body.appendChild(script);
-    }
-
     const tickInterval = setInterval(() => setTimeTick(t => t + 1), 20000);
-
+    
     const initAuth = async () => {
       try {
         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
@@ -545,7 +532,7 @@ function MainApp() {
         }
       }
     });
-
+    
     const pingPresence = () => {
       if (!auth.currentUser) return;
       const creds = JSON.parse(localStorage.getItem('aura_creds') || '{}');
@@ -558,7 +545,7 @@ function MainApp() {
         }).catch(()=>{});
       }
     };
-
+    
     const handleVisibility = () => {
       if (!auth.currentUser) return;
       const creds = JSON.parse(localStorage.getItem('aura_creds') || '{}');
@@ -572,11 +559,11 @@ function MainApp() {
         pingPresence();
       }
     };
-
+    
     const pingInterval = setInterval(pingPresence, 20000);
     document.addEventListener('visibilitychange', handleVisibility);
     window.addEventListener('pagehide', handleVisibility);
-
+    
     return () => {
       clearInterval(pingInterval);
       clearInterval(tickInterval);
@@ -598,7 +585,7 @@ function MainApp() {
         }
       }
     }, (error) => console.error("Config fetch error:", error));
-
+    
     return () => unsubUpdate();
   }, [isAuthReady, auth.currentUser]);
 
@@ -608,11 +595,11 @@ function MainApp() {
       const cachedMsgs = localStorage.getItem('aura_msgs_cache');
       if (cachedMsgs) setMessages(JSON.parse(cachedMsgs));
     } catch(e){}
-
+    
     const unsubU = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', USERS_COL), s => {
       setAllUsers(s.docs.map(d => d.data()));
     }, err => console.error("Users fetch error:", err));
-
+    
     const unsubServers = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', SERVERS_COL), s => {
       const serverList = s.docs.map(d => ({ id: d.id, ...d.data() }));
       setServers(serverList.length > 0 ? serverList : [
@@ -671,7 +658,7 @@ function MainApp() {
         }
       });
     }, err => console.error("Calls fetch error:", err));
-
+    
     return () => { unsubU(); unsubServers(); unsubG(); unsubM(); unsubC(); unsubL(); };
   }, [user?.username, selectedPeer?.username, messages.length, auth.currentUser]);
 
@@ -681,7 +668,7 @@ function MainApp() {
     const intervals = [];
     const contexts = [];
 
-    const monitorStream = (stream, peerId) => {
+    const monitorStream = (stream, username) => {
       if (!stream || stream.getAudioTracks().length === 0) return;
       try {
         const audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -697,8 +684,8 @@ function MainApp() {
           const sum = dataArray.reduce((a, b) => a + b, 0);
           const average = sum / bufferLength;
           setSpeakingUsers(prev => {
-            if (!!prev[peerId] === (average > 15)) return prev;
-            return { ...prev, [peerId]: average > 15 };
+             if (!!prev[username] === (average > 15)) return prev;
+             return { ...prev, [username]: average > 15 };
           });
         }, 120);
 
@@ -709,60 +696,44 @@ function MainApp() {
       }
     };
 
-    const myPeerId = getCleanPeerId(groupCall.id, user.username);
     if (localGroupStreamRef.current && !groupCallMuted) {
-      monitorStream(localGroupStreamRef.current, myPeerId);
+       monitorStream(localGroupStreamRef.current, user.username);
     } else {
-      setSpeakingUsers(prev => ({...prev, [myPeerId]: false}));
+       setSpeakingUsers(prev => ({...prev, [user.username]: false}));
     }
 
-    Object.entries(groupRemoteStreams).forEach(([peerId, stream]) => {
-      monitorStream(stream, peerId);
+    Object.entries(groupRemoteStreams).forEach(([uname, stream]) => {
+       monitorStream(stream, uname);
     });
 
     return () => {
-      intervals.forEach(clearInterval);
-      contexts.forEach(ctx => {
-        if (ctx.state !== 'closed') ctx.close().catch(()=>{});
-      });
+       intervals.forEach(clearInterval);
+       contexts.forEach(ctx => {
+         if (ctx.state !== 'closed') ctx.close().catch(()=>{});
+       });
     };
   }, [groupCall, groupRemoteStreams, groupCallMuted, user]);
-
-  // Синхронизация списка участников группового звонка
-  useEffect(() => {
-    if (!groupCall?.id) return;
-    const callRef = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, groupCall.id);
-    const unsub = onSnapshot(callRef, (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        if (data.status === 'active') {
-          setGroupCall(prev => ({ ...prev, participants: data.participants }));
-        } else {
-          leaveGroupCall(false);
-        }
-      }
-    });
-    return () => unsub();
-  }, [groupCall?.id]);
 
   // ЛОГИКА РАСЧЕТА РЕАЛЬНОГО ПИНГА (RTT)
   useEffect(() => {
     if (!callSession && !groupCall) return;
-
+    
     const pingInterval = setInterval(async () => {
       try {
         const start = Date.now();
+        // Используем реальный легковесный запрос
         await fetch('https://www.gstatic.com/generate_204', { mode: 'no-cors', cache: 'no-cache' });
         const latency = Date.now() - start;
-        setCurrentPing(Math.max(8, latency - 15));
+        // Чтобы пинг был похож на настоящий, берем минимальное значение
+        setCurrentPing(Math.max(8, latency - 15)); 
       } catch(e) {
         setCurrentPing(Math.floor(Math.random() * 25 + 8)); // fallback
       }
     }, 5000);
 
     fetch('https://www.gstatic.com/generate_204', { mode: 'no-cors', cache: 'no-cache' })
-        .then(() => setCurrentPing(Math.floor(Math.random() * 20 + 10)))
-        .catch(() => setCurrentPing(33));
+      .then(() => setCurrentPing(Math.floor(Math.random() * 20 + 10)))
+      .catch(() => setCurrentPing(33));
 
     return () => clearInterval(pingInterval);
   }, [callSession, groupCall]);
@@ -796,7 +767,9 @@ function MainApp() {
   useEffect(() => {
     if (remoteVideoRef.current && selectedDevices.audioOut) {
       if (typeof remoteVideoRef.current.setSinkId === 'function') {
-        remoteVideoRef.current.setSinkId(selectedDevices.audioOut).catch(err => {});
+        remoteVideoRef.current.setSinkId(selectedDevices.audioOut).catch(err => {
+          console.warn("Браузер не разрешил переключить динамик:", err);
+        });
       }
     }
   }, [selectedDevices.audioOut, callSession?.status]);
@@ -830,23 +803,23 @@ function MainApp() {
       if (authStep === 'reg') {
         const snap = await getDoc(uRef);
         if (snap.exists()) return setErrorMsg("Логин занят");
-
+        
         let discriminator = Math.floor(1000 + Math.random() * 9000).toString();
         const allUsersSnap = await getDocs(collection(db, 'artifacts', appId, 'public', 'data', USERS_COL));
         const existingDiscriminators = allUsersSnap.docs.map(d => d.data().discriminator || '0000');
         while (existingDiscriminators.includes(discriminator)) {
           discriminator = Math.floor(1000 + Math.random() * 9000).toString();
         }
-
-        const newUser = {
-          username: safeU,
-          password,
-          name: name || safeU,
-          avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${safeU}`,
-          status: 'online',
-          showLastSeen: true,
-          ts: Date.now(),
-          pinnedChats: [],
+        
+        const newUser = { 
+          username: safeU, 
+          password, 
+          name: name || safeU, 
+          avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${safeU}`, 
+          status: 'online', 
+          showLastSeen: true, 
+          ts: Date.now(), 
+          pinnedChats: [], 
           friends: [],
           hiddenChats: [],
           discriminator: discriminator
@@ -855,14 +828,14 @@ function MainApp() {
         setUser(newUser);
       } else {
         const snap = await getDoc(uRef);
-        if (snap.exists() && snap.data().password === password) {
+        if (snap.exists() && snap.data().password === password) { 
           let userData = snap.data();
           if (!userData.discriminator) {
             const newDiscriminator = Math.floor(1000 + Math.random() * 9000).toString();
             await updateDoc(uRef, { discriminator: newDiscriminator });
             userData.discriminator = newDiscriminator;
           }
-          setUser(userData);
+          setUser(userData); 
         }
         else return setErrorMsg("Неверный логин или пароль");
       }
@@ -973,14 +946,14 @@ function MainApp() {
       setReplyTo(null);
       return;
     }
-
+    
     if (type === 'text' && (!val || typeof val !== 'string' || !val.trim())) return;
-
+    
     if (editingMsg && type === 'text') {
       await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', MESSAGES_COL, editingMsg.id), { text: val, edited: true });
       setEditingMsg(null); setInput(''); return;
     }
-
+    
     try {
       let finalVal = val;
       const targetPeer = selectedPeer ? selectedPeer.username : 'global';
@@ -1010,7 +983,7 @@ function MainApp() {
     if (!file) return;
     setPreviewFile(file);
   };
-
+  
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -1055,7 +1028,7 @@ function MainApp() {
       mediaRec.current.timer = timer;
     } catch (e) {}
   };
-
+  
   const stopMediaRecording = (cancel = false) => {
     if (!mediaRec.current || mediaRec.current.state === 'inactive') { setIsRecording(null); return; }
     if (cancel) mediaRec.current.onstop = null;
@@ -1072,7 +1045,7 @@ function MainApp() {
     }
     return false;
   };
-
+  
   const formatLastSeen = (uData) => {
     if (!uData || uData.showLastSeen === false) return 'был(а) недавно';
     if (checkIsOnline(uData)) return 'в сети';
@@ -1086,6 +1059,25 @@ function MainApp() {
 
   const startCall = async (type, targetPeer = selectedPeer) => {
     if (!targetPeer) return;
+    
+    let stream;
+    try {
+      const constraints = { audio: selectedDevices.audioIn ? { deviceId: { exact: selectedDevices.audioIn } } : true, video: type === 'video' };
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (e) {
+      if (window.confirm("Не удалось получить доступ к микрофону. Хотите войти в режиме прослушивания?")) {
+        try {
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          const ctx = new AudioContext();
+          stream = ctx.createMediaStreamDestination().stream;
+        } catch(err) {
+          stream = new MediaStream();
+        }
+      } else {
+        return;
+      }
+    }
+    
     await getMediaDevices();
     const callId = user.username + '_' + Date.now();
     setCallSession({ id: callId, status: 'calling', peer: targetPeer, type, isInitiator: true });
@@ -1094,42 +1086,40 @@ function MainApp() {
     try {
       const peerConnection = new RTCPeerConnection(RTC_SERVERS);
       pcRef.current = peerConnection;
-      const constraints = { audio: selectedDevices.audioIn ? { deviceId: { exact: selectedDevices.audioIn } } : true, video: type === 'video' };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       localStream.current = stream;
       setTimeout(() => { if(localVideoRef.current) localVideoRef.current.srcObject = stream; }, 100);
       stream.getTracks().forEach(track => peerConnection.addTrack(track, stream));
-
+      
       peerConnection.ontrack = event => { if (remoteVideoRef.current) { remoteVideoRef.current.srcObject = event.streams[0]; } };
-
+      
       peerConnection.oniceconnectionstatechange = () => {
         if (peerConnection.iceConnectionState === 'connected' || peerConnection.iceConnectionState === 'completed') {
           setRemoteStreamConnected(true);
         }
       };
-
+      
       const callDoc = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, callId);
       const callerCandidatesCollection = collection(callDoc, 'callerCandidates');
       const calleeCandidatesCollection = collection(callDoc, 'calleeCandidates');
-
+      
       peerConnection.onicecandidate = event => { if (event.candidate) addDoc(callerCandidatesCollection, event.candidate.toJSON()); };
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
       await setDoc(callDoc, { caller: user.username, callee: targetPeer.username, status: 'calling', type, ts: Date.now(), offer: { type: offer.type, sdp: offer.sdp } });
-
+      
       onSnapshot(callDoc, snapshot => {
         const data = snapshot.data();
         if (!data) return;
         if (data.status === 'ended' || data.status === 'rejected') { endCall(false); return; }
-        if (data.answer && !peerConnection.currentRemoteDescription) {
-          peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer)).catch(()=>{});
-          setCallSession(prev => ({ ...prev, status: 'active' }));
+        if (data.answer && !peerConnection.currentRemoteDescription) { 
+          peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer)).catch(()=>{}); 
+          setCallSession(prev => ({ ...prev, status: 'active' })); 
         }
       });
-      onSnapshot(calleeCandidatesCollection, snapshot => {
-        snapshot.docChanges().forEach(change => {
-          if (change.type === 'added') peerConnection.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(()=>{});
-        });
+      onSnapshot(calleeCandidatesCollection, snapshot => { 
+        snapshot.docChanges().forEach(change => { 
+          if (change.type === 'added') peerConnection.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(()=>{}); 
+        }); 
       });
     } catch (e) { endCall(true); }
   };
@@ -1138,39 +1128,52 @@ function MainApp() {
     setCallSession(prev => ({ ...prev, status: 'active' }));
     setRemoteStreamConnected(false);
     setIsCallMinimized(false);
+    
+    let stream;
+    try {
+      const constraints = { audio: selectedDevices.audioIn ? { deviceId: { exact: selectedDevices.audioIn } } : true, video: callSession.type === 'video' };
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (e) {
+      try {
+         const AudioContext = window.AudioContext || window.webkitAudioContext;
+         const ctx = new AudioContext();
+         stream = ctx.createMediaStreamDestination().stream;
+      } catch(err) {
+         stream = new MediaStream();
+      }
+    }
+    
     try {
       const peerConnection = new RTCPeerConnection(RTC_SERVERS);
       pcRef.current = peerConnection;
-      const constraints = { audio: selectedDevices.audioIn ? { deviceId: { exact: selectedDevices.audioIn } } : true, video: callSession.type === 'video' };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       localStream.current = stream;
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
       stream.getTracks().forEach(track => peerConnection.addTrack(track, stream));
-
+      
       peerConnection.ontrack = event => { if (remoteVideoRef.current) { remoteVideoRef.current.srcObject = event.streams[0]; } };
-
+      
       peerConnection.oniceconnectionstatechange = () => {
         if (peerConnection.iceConnectionState === 'connected' || peerConnection.iceConnectionState === 'completed') {
           setRemoteStreamConnected(true);
         }
       };
-
+      
       const callDoc = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, callSession.id);
       const callerCandidatesCollection = collection(callDoc, 'callerCandidates');
       const calleeCandidatesCollection = collection(callDoc, 'calleeCandidates');
-
+      
       peerConnection.onicecandidate = event => { if (event.candidate) addDoc(calleeCandidatesCollection, event.candidate.toJSON()); };
       const callData = (await getDoc(callDoc)).data();
       await peerConnection.setRemoteDescription(new RTCSessionDescription(callData.offer));
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
       await updateDoc(callDoc, { status: 'active', answer: { type: answer.type, sdp: answer.sdp } });
-
+      
       onSnapshot(callDoc, snapshot => { if (snapshot.data()?.status === 'ended' || snapshot.data()?.status === 'rejected') endCall(false); });
-      onSnapshot(callerCandidatesCollection, snapshot => {
-        snapshot.docChanges().forEach(change => {
-          if (change.type === 'added') peerConnection.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(()=>{});
-        });
+      onSnapshot(callerCandidatesCollection, snapshot => { 
+        snapshot.docChanges().forEach(change => { 
+          if (change.type === 'added') peerConnection.addIceCandidate(new RTCIceCandidate(change.doc.data())).catch(()=>{}); 
+        }); 
       });
     } catch (e) { endCall(true); }
   };
@@ -1187,15 +1190,15 @@ function MainApp() {
 
   const startGroupCall = async (roomName = 'General Voice') => {
     if (!user) return;
-
     if (groupCall && groupCall.name === roomName) return;
     if (groupCall) await leaveGroupCall(true);
-
     const callId = `group-${roomName.toLowerCase().replace(/\s+/g, '-')}`;
+    
+    setToast({ name: "Система", text: "Подключение к серверу LiveKit...", avatar: "" });
 
     try {
-      // Получаем токен от Vercel
-      const tokenResponse = await fetch('https://aura-full-discord-758l-epu49xalh-bodyanbl4s-projects.vercel.app/api/token', {
+      // 1. ПОЛУЧАЕМ ТОКЕН ОТ VERCEL С ИСПОЛЬЗОВАНИЕМ ССЫЛКИ ИЗ СКРИНШОТА
+      const tokenResponse = await fetch('https://aura-full-discord-758l-6nrr26gn6-bodyanbl4s-projects.vercel.app/api/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1205,34 +1208,51 @@ function MainApp() {
       });
 
       if (!tokenResponse.ok) {
-        const errorText = await tokenResponse.text();
-        throw new Error(`Vercel error: ${errorText}`);
+        throw new Error(`Ошибка Vercel API: ${tokenResponse.status}`);
       }
 
-      const { token } = await tokenResponse.json();
+      const data = await tokenResponse.json();
+      const token = data.token || data;
 
-      if (!token) {
-        throw new Error('No token received from Vercel');
-      }
+      if (!token) throw new Error("Токен не получен");
 
-      // LiveKit - минимальная нагрузка на ПК (SFU)
+      // 2. ПОДКЛЮЧЕНИЕ К LIVEKIT
       const room = new Room();
+      window.livekitRoom = room;
+
       await room.connect('wss://aura-oau79de6.livekit.cloud', token);
-      
-      // Публикуем аудио
-      const tracks = await createLocalTracks({ audio: true, video: false });
-      await room.localParticipant.publishTracks(tracks);
-      
-      localGroupStreamRef.current = tracks[0].mediaStream;
+
+      let tracks;
+      try {
+        tracks = await createLocalTracks({ audio: true, video: false });
+      } catch (e) {
+        if (window.confirm("Не удалось получить доступ к микрофону. Хотите войти в режиме зрителя?")) {
+           tracks = []; // Слушаем без публикации своего звука
+        } else {
+           room.disconnect();
+           return;
+        }
+      }
+
+      if (tracks.length > 0) {
+         await room.localParticipant.publishTracks(tracks);
+         const localStream = new MediaStream();
+         tracks.forEach(t => localStream.addTrack(t.mediaStreamTrack));
+         localGroupStreamRef.current = localStream;
+      } else {
+         localGroupStreamRef.current = null;
+      }
+
       setGroupCallMuted(false);
       setGroupCallVideoEnabled(false);
 
-      // Слушаем события
+      // 3. ОБРАБОТКА ВХОДЯЩИХ ПОТОКОВ
       room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
-        if (track.kind === 'audio') {
+        if (track.kind === 'audio' || track.kind === 'video') {
+          const remoteStream = new MediaStream([track.mediaStreamTrack]);
           setGroupRemoteStreams(prev => ({
             ...prev,
-            [participant.identity]: track.mediaStream
+            [participant.identity]: remoteStream
           }));
         }
       });
@@ -1245,39 +1265,44 @@ function MainApp() {
         });
       });
 
-      // Сохраняем room для управления
-      window.livekitRoom = room;
+      // ОБНОВЛЯЕМ БАЗУ (ЧТОБЫ ДРУГИЕ ВИДЕЛИ В САЙДБАРЕ)
+      const callRef = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, callId);
+      const snap = await getDoc(callRef);
+      let currentParticipants = [];
+      if (snap.exists() && snap.data().status === 'active') {
+        currentParticipants = snap.data().participants || [];
+      }
+      if (!currentParticipants.find(p => p.username === user.username)) {
+        currentParticipants.push({ username: user.username, name: user.name || user.username, avatar: user.avatar, isStreaming: false });
+        await setDoc(callRef, { id: callId, type: 'group', name: roomName, participants: currentParticipants, status: 'active', ts: Date.now(), createdBy: user.username }, { merge: true });
+      }
 
-      setGroupCall({
-        id: callId,
-        name: roomName,
-        status: 'active',
-        livekitRoom: room
-      });
+      setGroupCall({ id: callId, name: roomName, participants: currentParticipants, status: 'active' });
       setIsCallMinimized(false);
+      playTone('unmute');
 
     } catch (e) {
-      console.error("LiveKit error:", e);
-      setToast({name: "Ошибка", text: `Не удалось подключиться: ${e.message}`, avatar: ""});
+      console.error("LiveKit connection error:", e);
+      setToast({ name: "Ошибка подключения", text: `${e.message}`, avatar: "" });
     }
   };
 
   const leaveGroupCall = async (updateDb = true) => {
     if (!groupCall) return;
     playTone('leave');
+    
+    if (window.livekitRoom) {
+      window.livekitRoom.disconnect();
+      window.livekitRoom = null;
+    }
 
     if (localGroupStreamRef.current) {
       localGroupStreamRef.current.getTracks().forEach(t => t.stop());
       localGroupStreamRef.current = null;
     }
-
-    if (peerInstance.current) {
-      peerInstance.current.destroy();
-      peerInstance.current = null;
-    }
-
+    
     setGroupRemoteStreams({});
-
+    
     if (updateDb && groupCall.id) {
       const callRef = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, groupCall.id);
       try {
@@ -1294,72 +1319,55 @@ function MainApp() {
   };
 
   const toggleGroupMic = () => {
-    setGroupCallMuted(prev => {
-      const newState = !prev;
-      if (localGroupStreamRef.current) {
-        const audioTracks = localGroupStreamRef.current.getAudioTracks();
-        if (audioTracks.length > 0) {
-          audioTracks[0].enabled = !newState;
-        }
-      }
-      playTone(newState ? 'mute' : 'unmute');
-      return newState;
-    });
+    if (window.livekitRoom && localGroupStreamRef.current) {
+      const isMuted = !groupCallMuted;
+      window.livekitRoom.localParticipant.setMicrophoneEnabled(!isMuted);
+      setGroupCallMuted(isMuted);
+      playTone(isMuted ? 'mute' : 'unmute');
+    }
   };
 
   const toggleGroupScreenShare = async () => {
     try {
-      if (!groupCall) return;
+      if (!groupCall || !window.livekitRoom) return;
       const callRef = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, groupCall.id);
 
-      if (groupCallVideoEnabled) {
-        const videoTracks = localGroupStreamRef.current?.getVideoTracks();
-        if (videoTracks && videoTracks.length > 0) {
-          videoTracks[0].stop();
-          localGroupStreamRef.current.removeTrack(videoTracks[0]);
-        }
+      if (groupCallVideoEnabled) { 
+        await window.livekitRoom.localParticipant.setScreenShareEnabled(false);
         setGroupCallVideoEnabled(false);
         playTone('mute');
 
         const snap = await getDoc(callRef);
         if (snap.exists()) {
-          const parts = snap.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: false } : p);
-          await updateDoc(callRef, { participants: parts });
+           const parts = snap.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: false } : p);
+           await updateDoc(callRef, { participants: parts });
         }
       } else {
-        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-        const videoTrack = stream.getVideoTracks()[0];
-        if (localGroupStreamRef.current) {
-          localGroupStreamRef.current.addTrack(videoTrack);
-        }
-
-        if (peerInstance.current) {
-          Object.values(peerInstance.current.connections).forEach(conns => {
-            conns.forEach(conn => {
-              const sender = conn.peerConnection?.getSenders().find(s => s.track?.kind === 'video');
-              if (sender) sender.replaceTrack(videoTrack);
-              else if (conn.peerConnection) conn.peerConnection.addTrack(videoTrack, localGroupStreamRef.current);
-            });
-          });
-        }
-
+        await window.livekitRoom.localParticipant.setScreenShareEnabled(true);
         setGroupCallVideoEnabled(true);
         playTone('unmute');
 
         const snap = await getDoc(callRef);
         if (snap.exists()) {
-          const parts = snap.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: true } : p);
-          await updateDoc(callRef, { participants: parts });
+           const parts = snap.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: true } : p);
+           await updateDoc(callRef, { participants: parts });
         }
-
-        videoTrack.onended = async () => {
-          setGroupCallVideoEnabled(false);
-          const s = await getDoc(callRef);
-          if (s.exists()) {
-            const p2 = s.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: false } : p);
-            await updateDoc(callRef, { participants: p2 });
+        
+        // Когда пользователь сам завершает стрим через браузер
+        const screenTracks = window.livekitRoom.localParticipant.videoTrackPublications;
+        for (const [, pub] of screenTracks) {
+          if (pub.track && pub.source === 'screen_share') {
+            pub.track.mediaStreamTrack.onended = async () => {
+               await window.livekitRoom.localParticipant.setScreenShareEnabled(false);
+               setGroupCallVideoEnabled(false);
+               const s = await getDoc(callRef);
+               if (s.exists()) {
+                  const p2 = s.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: false } : p);
+                  await updateDoc(callRef, { participants: p2 });
+               }
+            };
           }
-        };
+        }
       }
     } catch(e){}
   };
@@ -1387,7 +1395,7 @@ function MainApp() {
         const sender = pcRef.current.getSenders().find(s => s.track?.kind === 'video');
         if (sender) sender.replaceTrack(videoTrack);
         setCallState(prev => ({ ...prev, screenShare: true }));
-
+        
         videoTrack.onended = async () => {
           const stream = await navigator.mediaDevices.getUserMedia({ video: true });
           const vTrack = stream.getVideoTracks()[0];
@@ -1463,9 +1471,9 @@ function MainApp() {
         const isFriend = (user?.friends || []).includes(u.username);
         const matchesSearch = safeText(u.name).toLowerCase().includes(searchQuery.toLowerCase());
         return u.username !== user?.username &&
-            !(user?.hiddenChats || []).includes(u.username) &&
-            isFriend &&
-            matchesSearch;
+                !(user?.hiddenChats || []).includes(u.username) &&
+                isFriend &&
+                matchesSearch;
       })
       .sort((a,b) => {
         const aPin = user?.pinnedChats?.includes(a.username) ? 1 : 0;
@@ -1481,29 +1489,29 @@ function MainApp() {
         <style>{getAuraStyles(theme)}</style>
         {isDraggingFile && (<div className="drag-overlay"><Download size={60} color="var(--aura-red)" /><h2 style={{fontSize: 24, fontWeight: 700}}>Отпустите файл для отправки</h2></div>)}
         <div className="app-container">
-
+          
           <div className={`sidebar ${selectedPeer && (view === 'chats' || view === 'calls' || view === 'server') ? 'hide' : ''}`}>
-
+            
             <div style={{width: '72px', background: '#202225', display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: '12px', gap: '8px', borderRight: '1px solid var(--border)', flexShrink: 0, zIndex: 10, overflowY: 'auto'}}>
               <button onClick={() => { setView('chats'); setSelectedPeer(null); }} style={{width:48, height:48, borderRadius: view === 'chats' ? '16px' : '50%', background: '#5865F2', display:'flex', alignItems:'center', justifyContent:'center', border: 'none', marginBottom: '8px', cursor: 'pointer', transition: 'all 0.2s'}}>
                 <Zap size={24} color="white" fill="white" />
               </button>
-
+              
               <div style={{width: '32px', height: '2px', background: '#292b2f', margin: '4px 0', flexShrink: 0}} />
-
+              
               {servers.map((s, idx) => (
-                  <button key={s.id || idx} onClick={() => { setView('server'); setCurrentServer(s); setSelectedPeer(null); }} style={{width:48, height:48, flexShrink: 0, borderRadius: currentServer?.id === s.id && view === 'server' ? '16px' : '50%', background: 'var(--bg-card)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:22, border: 'none', transition: 'all 0.2s', cursor: 'pointer', boxShadow: currentServer?.id === s.id && view === 'server' ? '0 0 10px rgba(88,101,242,0.5)' : 'none'}}>
-                    {safeText(s.icon)}
-                  </button>
+                <button key={s.id || idx} onClick={() => { setView('server'); setCurrentServer(s); setSelectedPeer(null); }} style={{width:48, height:48, flexShrink: 0, borderRadius: currentServer?.id === s.id && view === 'server' ? '16px' : '50%', background: 'var(--bg-card)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:22, border: 'none', transition: 'all 0.2s', cursor: 'pointer', boxShadow: currentServer?.id === s.id && view === 'server' ? '0 0 10px rgba(88,101,242,0.5)' : 'none'}}>
+                  {safeText(s.icon)}
+                </button>
               ))}
-
+              
               <button onClick={() => setShowCreateServer(true)} style={{width:48, height:48, flexShrink: 0, borderRadius: '50%', background: '#36393e', display:'flex', alignItems:'center', justifyContent:'center', fontSize:24, color: '#43b581', border: '2px dashed #43b581', marginTop: '8px', cursor: 'pointer', transition: 'all 0.2s'}}>
                 +
               </button>
             </div>
 
             <div style={{flex: 1, display: 'flex', flexDirection: 'column', background: 'var(--bg-side)', overflow: 'hidden'}}>
-
+              
               <div className="nav-bar">
                 <div style={{display:'flex', alignItems:'center', gap:12}}>
                   <Zap size={28} color="var(--aura-red)" fill="var(--aura-red)" />
@@ -1513,63 +1521,63 @@ function MainApp() {
                 </div>
                 <Bell size={20} color="var(--aura-red)" style={{cursor:'pointer'}} />
               </div>
-
+              
               <div style={{flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column'}}>
-
+                
                 {view === 'server' && (
-                    <div style={{padding: '8px 0'}}>
+                  <div style={{padding: '8px 0'}}>
+                    <div style={{padding: '4px 16px', fontSize:11, color:'#8e9297', fontWeight:700, display:'flex', alignItems:'center', gap:6}}>
+                      ТЕКСТОВЫЕ КАНАЛЫ <span style={{marginLeft:'auto'}}>⌄</span>
+                    </div>
+                    <button onClick={() => setSelectedPeer({username:'global', name:'# general', avatar:'', isChannel: true})} style={{width:'calc(100% - 16px)', margin: '4px 8px', padding:'8px 12px', textAlign:'left', background: selectedPeer?.name === '# general' ? 'rgba(255,255,255,0.08)' : 'transparent', color: selectedPeer?.name === '# general' ? '#fff' : 'var(--text-sec)', borderRadius: '6px', display:'flex', alignItems:'center', gap:8, border: 'none', cursor: 'pointer', transition: '0.2s'}}>
+                      <span style={{color:'var(--text-sec)', fontSize: 18}}>#</span> general
+                    </button>
+                    <button onClick={() => setSelectedPeer({username:'global', name:'# news', avatar:'', isChannel: true})} style={{width:'calc(100% - 16px)', margin: '4px 8px', padding:'8px 12px', textAlign:'left', background: selectedPeer?.name === '# news' ? 'rgba(255,255,255,0.08)' : 'transparent', color: selectedPeer?.name === '# news' ? '#fff' : 'var(--text-sec)', borderRadius: '6px', display:'flex', alignItems:'center', gap:8, border: 'none', cursor: 'pointer', transition: '0.2s'}}>
+                      <span style={{color:'var(--text-sec)', fontSize: 18}}>#</span> news
+                    </button>
+
+                    <div style={{marginTop: '20px'}}>
                       <div style={{padding: '4px 16px', fontSize:11, color:'#8e9297', fontWeight:700, display:'flex', alignItems:'center', gap:6}}>
-                        ТЕКСТОВЫЕ КАНАЛЫ <span style={{marginLeft:'auto'}}>⌄</span>
+                        ГОЛОСОВЫЕ КАНАЛЫ <span style={{marginLeft:'auto'}}>⌄</span>
                       </div>
-                      <button onClick={() => setSelectedPeer({username:'global', name:'# general', avatar:'', isChannel: true})} style={{width:'calc(100% - 16px)', margin: '4px 8px', padding:'8px 12px', textAlign:'left', background: selectedPeer?.name === '# general' ? 'rgba(255,255,255,0.08)' : 'transparent', color: selectedPeer?.name === '# general' ? '#fff' : 'var(--text-sec)', borderRadius: '6px', display:'flex', alignItems:'center', gap:8, border: 'none', cursor: 'pointer', transition: '0.2s'}}>
-                        <span style={{color:'var(--text-sec)', fontSize: 18}}>#</span> general
-                      </button>
-                      <button onClick={() => setSelectedPeer({username:'global', name:'# news', avatar:'', isChannel: true})} style={{width:'calc(100% - 16px)', margin: '4px 8px', padding:'8px 12px', textAlign:'left', background: selectedPeer?.name === '# news' ? 'rgba(255,255,255,0.08)' : 'transparent', color: selectedPeer?.name === '# news' ? '#fff' : 'var(--text-sec)', borderRadius: '6px', display:'flex', alignItems:'center', gap:8, border: 'none', cursor: 'pointer', transition: '0.2s'}}>
-                        <span style={{color:'var(--text-sec)', fontSize: 18}}>#</span> news
-                      </button>
-
-                      <div style={{marginTop: '20px'}}>
-                        <div style={{padding: '4px 16px', fontSize:11, color:'#8e9297', fontWeight:700, display:'flex', alignItems:'center', gap:6}}>
-                          ГОЛОСОВЫЕ КАНАЛЫ <span style={{marginLeft:'auto'}}>⌄</span>
-                        </div>
-
-                        {['Основной', 'Игровая комната', 'AFK'].map((chName, i) => {
-                          const participants = activeChannels[chName] || [];
-                          const isActive = groupCall?.name === chName;
-                          return (
-                              <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 2, marginBottom: 8 }}>
-                                <button onClick={() => startGroupCall(chName)} style={{
-                                  width: 'calc(100% - 16px)', margin: '0 8px', padding: '8px 12px', textAlign: 'left',
-                                  background: isActive ? 'rgba(255,255,255,0.08)' : 'transparent',
-                                  borderRadius: '6px', display: 'flex', alignItems: 'center', gap: 8,
-                                  color: isActive ? '#fff' : 'var(--text-sec)', border: 'none', cursor: 'pointer', transition: '0.2s'
-                                }}>
-                                  <span style={{color: isActive ? '#34C759' : 'var(--text-sec)', fontSize: 16}}>🔊</span>
-                                  <span style={{flex: 1, fontWeight: 600}}>{safeText(chName)}</span>
-                                </button>
-
-                                {participants.length > 0 && (
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4, paddingBottom: 4 }}>
-                                      {participants.map((p, idx) => (
-                                          <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px 4px 38px' }}>
-                                            <img src={safeText(p.avatar)} style={{ width: 24, height: 24, borderRadius: '50%', border: p.isStreaming ? '2px solid #da373c' : '2px solid transparent' }} alt="u" />
-                                            <span style={{ fontSize: 14, color: 'var(--text-sec)', flex: 1, textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap', fontWeight: 600 }}>
+                      
+                      {['Основной', 'Игровая комната', 'AFK'].map((chName, i) => {
+                        const participants = activeChannels[chName] || [];
+                        const isActive = groupCall?.name === chName;
+                        return (
+                          <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 2, marginBottom: 8 }}>
+                            <button onClick={() => startGroupCall(chName)} style={{
+                              width: 'calc(100% - 16px)', margin: '0 8px', padding: '8px 12px', textAlign: 'left',
+                              background: isActive ? 'rgba(255,255,255,0.08)' : 'transparent',
+                              borderRadius: '6px', display: 'flex', alignItems: 'center', gap: 8,
+                              color: isActive ? '#fff' : 'var(--text-sec)', border: 'none', cursor: 'pointer', transition: '0.2s'
+                            }}>
+                              <span style={{color: isActive ? '#34C759' : 'var(--text-sec)', fontSize: 16}}>🔊</span> 
+                              <span style={{flex: 1, fontWeight: 600}}>{safeText(chName)}</span>
+                            </button>
+                            
+                            {participants.length > 0 && (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4, paddingBottom: 4 }}>
+                                {participants.map((p, idx) => (
+                                  <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px 4px 38px' }}>
+                                    <img src={safeText(p.avatar)} style={{ width: 24, height: 24, borderRadius: '50%', border: p.isStreaming ? '2px solid #da373c' : '2px solid transparent' }} alt="u" />
+                                    <span style={{ fontSize: 14, color: 'var(--text-sec)', flex: 1, textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap', fontWeight: 600 }}>
                                       {safeText(p.name)}
                                     </span>
-                                            {p.isStreaming && (
-                                                <span style={{ background: '#da373c', color: 'white', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4, letterSpacing: 0.5 }}>
+                                    {p.isStreaming && (
+                                      <span style={{ background: '#da373c', color: 'white', fontSize: 10, fontWeight: 800, padding: '2px 6px', borderRadius: 4, letterSpacing: 0.5 }}>
                                         В ЭФИРЕ
                                       </span>
-                                            )}
-                                          </div>
-                                      ))}
-                                    </div>
-                                )}
+                                    )}
+                                  </div>
+                                ))}
                               </div>
-                          );
-                        })}
-                      </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
+                  </div>
                 )}
 
                 {view === 'chats' && (
@@ -1579,42 +1587,42 @@ function MainApp() {
                           <Search size={18} color="#8E8E93" />
                           <input style={{width:'100%', background: 'transparent', border: 'none', color: 'inherit', outline: 'none'}} placeholder="Поиск друзей..." value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} />
                         </div>
-
+                        
                         <div style={{marginTop: 12, display: 'flex', gap: 8}}>
-                          <input
-                              className="premium-input"
-                              placeholder="Имя#1234"
-                              id="add-friend-input"
-                              style={{flex: 1, fontSize: 13}}
+                          <input 
+                            className="premium-input" 
+                            placeholder="Имя#1234" 
+                            id="add-friend-input"
+                            style={{flex: 1, fontSize: 13}}
                           />
-                          <button
-                              onClick={async () => {
-                                const input = document.getElementById('add-friend-input').value.trim();
-                                if (!input.includes('#')) {
-                                  alert('Введите в формате Имя#1234');
-                                  return;
-                                }
-                                const [name, disc] = input.split('#');
-                                const found = allUsers.find(u =>
-                                    safeText(u.name).toLowerCase() === name.toLowerCase() &&
-                                    String(u.discriminator) === disc
-                                );
-                                if (found) {
-                                  const currentFriends = user.friends || [];
-                                  if (!currentFriends.includes(found.username)) {
-                                    const newFriends = [...currentFriends, found.username];
-                                    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', USERS_COL, user.username), { friends: newFriends });
-                                    setUser(prev => ({...prev, friends: newFriends}));
-                                    alert(`✅ ${safeText(found.name)}#${safeText(found.discriminator)} добавлен в друзья!`);
-                                  } else {
-                                    alert('Уже в друзьях');
-                                  }
-                                  document.getElementById('add-friend-input').value = '';
+                          <button 
+                            onClick={async () => {
+                              const input = document.getElementById('add-friend-input').value.trim();
+                              if (!input.includes('#')) {
+                                alert('Введите в формате Имя#1234');
+                                return;
+                              }
+                              const [name, disc] = input.split('#');
+                              const found = allUsers.find(u => 
+                                safeText(u.name).toLowerCase() === name.toLowerCase() && 
+                                String(u.discriminator) === disc
+                              );
+                              if (found) {
+                                const currentFriends = user.friends || [];
+                                if (!currentFriends.includes(found.username)) {
+                                  const newFriends = [...currentFriends, found.username];
+                                  await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', USERS_COL, user.username), { friends: newFriends });
+                                  setUser(prev => ({...prev, friends: newFriends}));
+                                  alert(`✅ ${safeText(found.name)}#${safeText(found.discriminator)} добавлен в друзья!`);
                                 } else {
-                                  alert('Пользователь не найден');
+                                  alert('Уже в друзьях');
                                 }
-                              }}
-                              style={{background: '#43b581', color: 'white', padding: '8px 16px', borderRadius: 12, fontSize: 13, fontWeight: 600, border: 'none', cursor: 'pointer'}}>
+                                document.getElementById('add-friend-input').value = '';
+                              } else {
+                                alert('Пользователь не найден');
+                              }
+                            }}
+                            style={{background: '#43b581', color: 'white', padding: '8px 16px', borderRadius: 12, fontSize: 13, fontWeight: 600, border: 'none', cursor: 'pointer'}}>
                             Добавить
                           </button>
                         </div>
@@ -1634,7 +1642,7 @@ function MainApp() {
                       </div>
                     </div>
                 )}
-
+                
                 {view === 'calls' && (
                     <div style={{flex:1, overflowY:'auto', padding: 20}}>
                       <h3 style={{fontSize: 13, textTransform: 'uppercase', color: 'var(--text-sec)', marginBottom: 20, letterSpacing: 1}}>ИСТОРИЯ ЗВОНКОВ</h3>
@@ -1672,26 +1680,26 @@ function MainApp() {
                 </div>
 
                 {showStatusMenu && (
-                    <div style={{position: 'absolute', bottom: 65, left: 10, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, padding: 8, zIndex: 1000, width: 200, boxShadow: '0 8px 24px rgba(0,0,0,0.4)'}}>
-                      {[
-                        {value: 'online', label: 'В сети', color: '#23a559'},
-                        {value: 'idle', label: 'Не активен', color: '#f0b232'},
-                        {value: 'dnd', label: 'Не беспокоить', color: '#f04747'},
-                        {value: 'offline', label: 'Невидимый', color: '#80848e'}
-                      ].map(s => (
-                          <div key={s.value} onClick={() => {
-                            setUser(prev => ({...prev, status: s.value}));
-                            updateDoc(doc(db,'artifacts',appId,'public','data',USERS_COL,user.username), { status: s.value, lastActiveTS: Date.now() });
-                            setShowStatusMenu(false);
-                          }} style={{display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', cursor: 'pointer', borderRadius: 4, transition: '0.2s', background: 'transparent'}} className="context-item">
-                            <div style={{width: 10, height: 10, borderRadius: '50%', background: s.color}} />
-                            <span style={{color: 'white', fontSize: 13, fontWeight: 500}}>{s.label}</span>
-                          </div>
-                      ))}
-                    </div>
+                  <div style={{position: 'absolute', bottom: 65, left: 10, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, padding: 8, zIndex: 1000, width: 200, boxShadow: '0 8px 24px rgba(0,0,0,0.4)'}}>
+                    {[
+                      {value: 'online', label: 'В сети', color: '#23a559'},
+                      {value: 'idle', label: 'Не активен', color: '#f0b232'},
+                      {value: 'dnd', label: 'Не беспокоить', color: '#f04747'},
+                      {value: 'offline', label: 'Невидимый', color: '#80848e'}
+                    ].map(s => (
+                      <div key={s.value} onClick={() => {
+                        setUser(prev => ({...prev, status: s.value}));
+                        updateDoc(doc(db,'artifacts',appId,'public','data',USERS_COL,user.username), { status: s.value, lastActiveTS: Date.now() });
+                        setShowStatusMenu(false);
+                      }} style={{display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', cursor: 'pointer', borderRadius: 4, transition: '0.2s', background: 'transparent'}} className="context-item">
+                        <div style={{width: 10, height: 10, borderRadius: '50%', background: s.color}} />
+                        <span style={{color: 'white', fontSize: 13, fontWeight: 500}}>{s.label}</span>
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
-
+              
               <div className="tab-bar">
                 <button className={`tab-btn ${view==='chats'?'active':''}`} onClick={()=>{setView('chats'); setSelectedPeer(null);}}><MessageCircle size={24}/>Чаты</button>
                 <button className={`tab-btn ${view==='calls'?'active':''}`} onClick={()=>{setView('calls'); setSelectedPeer(null);}}><Phone size={24}/>Звонки</button>
@@ -1700,7 +1708,7 @@ function MainApp() {
 
             </div>
           </div>
-
+          
           {(view === 'chats' || view === 'calls' || view === 'server') && (
               <div className={`main-stage ${!selectedPeer ? 'hide' : ''}`}>
                 {selectedPeer ? (
@@ -1708,39 +1716,39 @@ function MainApp() {
                       <div className="nav-bar">
                         <div style={{display:'flex', alignItems:'center', gap:15}}>
                           <button className="md:hide" onClick={()=>setSelectedPeer(null)} style={{color:'var(--aura-red)'}}><ChevronLeft size={32}/></button>
-
+                          
                           {selectedPeer.isChannel ? (
-                              <div style={{width:40, height:40, borderRadius:'50%', background:'var(--bg-card)', border:'1px solid var(--border)', display:'flex', alignItems:'center', justifyContent:'center'}}>
-                                <span style={{color:'var(--text-sec)', fontSize:20}}>#</span>
-                              </div>
+                            <div style={{width:40, height:40, borderRadius:'50%', background:'var(--bg-card)', border:'1px solid var(--border)', display:'flex', alignItems:'center', justifyContent:'center'}}>
+                              <span style={{color:'var(--text-sec)', fontSize:20}}>#</span>
+                            </div>
                           ) : (
-                              <img src={safeText(selectedPeer.avatar) || `https://api.dicebear.com/7.x/initials/svg?seed=${safeText(selectedPeer.username)}`} className="avatar" style={{width:40, height:40}} alt="p" />
+                            <img src={safeText(selectedPeer.avatar) || `https://api.dicebear.com/7.x/initials/svg?seed=${safeText(selectedPeer.username)}`} className="avatar" style={{width:40, height:40}} alt="p" />
                           )}
-
+                          
                           <div>
                             <b style={{fontSize:17, display:'block'}}>{safeText(selectedPeer.name)}</b>
                             {!selectedPeer.isChannel && (
-                                <span style={{fontSize:12, color: getStatusColor(allUsers.find(u=>u.username===selectedPeer.username))}}>
+                              <span style={{fontSize:12, color: getStatusColor(allUsers.find(u=>u.username===selectedPeer.username))}}>
                                 {formatLastSeen(allUsers.find(u=>u.username===selectedPeer.username))}
                               </span>
                             )}
                             {selectedPeer.isChannel && (
-                                <span style={{fontSize:12, color: 'var(--text-sec)'}}>Текстовый канал</span>
+                              <span style={{fontSize:12, color: 'var(--text-sec)'}}>Текстовый канал</span>
                             )}
                           </div>
                         </div>
-
+                        
                         {!selectedPeer.isChannel && (
-                            <div style={{display:'flex', gap:20}}>
-                              <button onClick={()=>startCall('voice')}><Phone size={22} color="var(--aura-red)"/></button>
-                              <button onClick={()=>startCall('video')}><Video size={24} color="var(--aura-red)"/></button>
-                              <button onClick={()=>setShowMediaGallery(!showMediaGallery)}><Info size={22} color="var(--aura-red)"/></button>
-                            </div>
+                          <div style={{display:'flex', gap:20}}>
+                            <button onClick={()=>startCall('voice')}><Phone size={22} color="var(--aura-red)"/></button>
+                            <button onClick={()=>startCall('video')}><Video size={24} color="var(--aura-red)"/></button>
+                            <button onClick={()=>setShowMediaGallery(!showMediaGallery)}><Info size={22} color="var(--aura-red)"/></button>
+                          </div>
                         )}
                       </div>
-
+                      
                       {pinnedMsg && (<button className="pinned-msg-bar" onClick={()=>scrollRef.current?.scrollTo(0,0)}><Pin size={16} color="var(--aura-red)" /><div style={{flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', fontSize:13}}>{safeText(pinnedMsg.text)}</div><X size={16} opacity={0.5} onClick={(e)=>{ e.stopPropagation(); updateDoc(doc(db,'artifacts',appId,'public','data',MESSAGES_COL,pinnedMsg.id), {isPinned: false}); }} /></button>)}
-
+                      
                       <div ref={scrollRef} className="chat-scroll">
                         <div style={{flex:1}} />
                         {chatMessages.filter(m => !(m.hiddenFor || []).includes(user.username)).map(m => (
@@ -1761,10 +1769,10 @@ function MainApp() {
                         )}
                         <div ref={messagesEndRef} style={{ height: 1 }} />
                       </div>
-
+                      
                       {replyTo && <div className="edit-mode-bar"><span>Ответ: {safeText(replyTo.text).substring(0,30)}...</span><button onClick={()=>setReplyTo(null)}><X size={16}/></button></div>}
                       {editingMsg && <div className="edit-mode-bar"><span>Редактирование...</span><button onClick={()=>setEditingMsg(null)}><X size={16}/></button></div>}
-
+                      
                       {previewFile && !isUploading && (
                           <div className="edit-mode-bar" style={{background: 'var(--bg-card)', borderTop: '1px solid var(--border)', borderRadius: '16px 16px 0 0', margin: '0 20px', padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 12}}>
                             <div style={{width: 40, height: 40, borderRadius: 8, background: 'var(--aura-red)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0}}>
@@ -1777,31 +1785,31 @@ function MainApp() {
                             <button onClick={() => setPreviewFile(null)} style={{background: 'rgba(255,255,255,0.1)', padding: 4, borderRadius: '50%', display:'flex', border:'none', cursor:'pointer'}}><X size={16} color="var(--text-sec)" /></button>
                           </div>
                       )}
-
+                      
                       <div className="chat-input-wrapper">
-                        <button
-                            onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                            style={{background:'transparent', border:'none', color:'#72767d', padding:'8px', cursor:'pointer', fontSize:18}}
-                            title="Эмодзи">
+                        <button 
+                          onClick={() => setShowEmojiPicker(!showEmojiPicker)} 
+                          style={{background:'transparent', border:'none', color:'#72767d', padding:'8px', cursor:'pointer', fontSize:18}}
+                          title="Эмодзи">
                           😊
                         </button>
-
+                        
                         {showEmojiPicker && (
-                            <div style={{position:'absolute', bottom:'60px', left:'20px', background:'#202225', borderRadius:8, padding:8, display:'grid', gridTemplateColumns:'repeat(8, 1fr)', gap:4, zIndex:1000, boxShadow:'0 4px 20px rgba(0,0,0,0.4)'}}>
-                              {['😀','😂','❤️','🔥','👍','👎','😮','😢','😡','🎉','🚀','💯','👀','🤔','😎','🥳'].map(emoji => (
-                                  <button
-                                      key={emoji}
-                                      onClick={() => {
-                                        setInput(prev => prev + emoji);
-                                        setShowEmojiPicker(false);
-                                      }}
-                                      style={{background:'transparent', border:'none', fontSize:22, padding:4, cursor:'pointer'}}>
-                                    {emoji}
-                                  </button>
-                              ))}
-                            </div>
+                          <div style={{position:'absolute', bottom:'60px', left:'20px', background:'#202225', borderRadius:8, padding:8, display:'grid', gridTemplateColumns:'repeat(8, 1fr)', gap:4, zIndex:1000, boxShadow:'0 4px 20px rgba(0,0,0,0.4)'}}>
+                            {['😀','😂','❤️','🔥','👍','👎','😮','😢','😡','🎉','🚀','💯','👀','🤔','😎','🥳'].map(emoji => (
+                              <button 
+                                key={emoji} 
+                                onClick={() => {
+                                  setInput(prev => prev + emoji);
+                                  setShowEmojiPicker(false);
+                                }}
+                                style={{background:'transparent', border:'none', fontSize:22, padding:4, cursor:'pointer'}}>
+                                {emoji}
+                              </button>
+                            ))}
+                          </div>
                         )}
-
+                        
                         {isUploading && uploadState.active ? (
                             <div style={{display:'flex', alignItems:'center', gap: 15, flex: 1, padding: '5px 10px'}}>
                               <div style={{position: 'relative', width: 40, height: 40, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
@@ -1846,7 +1854,7 @@ function MainApp() {
                 ) : (
                     <div style={{flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', opacity:0.04}}><Zap size={300} fill="currentColor" /><h1 style={{letterSpacing:25, fontSize:70, fontWeight:900}}>AURA</h1></div>
                 )}
-
+                
                 {showMediaGallery && selectedPeer && (
                     <div className="media-panel">
                       <div className="nav-bar"><b style={{fontSize:15}}>Медиа история</b><button onClick={()=>setShowMediaGallery(false)}><X size={20} style={{opacity:0.5}} /></button></div>
@@ -1856,7 +1864,7 @@ function MainApp() {
                 )}
               </div>
           )}
-
+          
           {view === 'settings' && (
               <div style={{flex:1, background:'var(--bg-main)', display:'flex', flexDirection:'column'}}>
                 <div className="nav-bar"><button onClick={()=>setView('chats')}><ChevronLeft size={32} color="var(--text-main)"/></button><h2>Настройки Aura</h2><div style={{width:32}}/></div>
@@ -1864,7 +1872,7 @@ function MainApp() {
                   <img src={safeText(user?.avatar)} className="avatar" style={{width:140, height:140, border:'4px solid var(--aura-red)', margin:'0 auto 20px', boxShadow:'0 10px 40px var(--aura-red-glow)', display:'block'}} alt="me" />
                   <h2 style={{fontSize:32}}>{safeText(user?.name)}#{String(user?.discriminator || '0000')}</h2>
                   <p style={{opacity:0.5, marginBottom:40}}>@{safeText(user?.username)}</p>
-
+                  
                   <div style={{maxWidth:600, margin:'0 auto', display:'grid', gap:20}}>
                     <div style={{background:'var(--bg-card)', padding:25, borderRadius:24, border:'1px solid var(--border)', textAlign:'left'}}>
                       <label style={{fontSize:12, textTransform:'uppercase', opacity:0.6, fontWeight:800, letterSpacing:1}}>Уведомления (iOS)</label>
@@ -1882,7 +1890,7 @@ function MainApp() {
                         <Bell size={20}/> Включить уведомления
                       </button>
                     </div>
-
+                    
                     <div style={{background:'var(--bg-card)', padding:25, borderRadius:24, border:'1px solid var(--border)', textAlign:'left'}}>
                       <label style={{fontSize:12, textTransform:'uppercase', opacity:0.6, fontWeight:800, letterSpacing:1}}>Оформление</label>
                       <div style={{display:'flex', gap:10, marginTop:15}}>
@@ -1891,24 +1899,24 @@ function MainApp() {
                         <button onClick={()=>{setTheme('mirror');  localStorage .setItem('aura_theme','mirror')}} style={{flex:1, padding:14, borderRadius:16, border:'1px solid var(--border)', background:theme==='mirror'?'var(--aura-red)':'var(--bg-main)', color:theme==='mirror'?'#fff':'var(--text-main)', fontWeight:700}}>Mirror</button>
                       </div>
                     </div>
-
+                    
                     <div style={{background:'var(--bg-card)', padding:25, borderRadius:24, border:'1px solid var(--border)', textAlign:'left'}}>
                       <label style={{fontSize:12, textTransform:'uppercase', opacity:0.6, fontWeight:800, letterSpacing:1}}>Приватность</label>
                       <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginTop:15}}>
                         <span style={{fontWeight:600}}>Показывать время захода</span>
-                        <div onClick={() => {
-                          const newVal = user.showLastSeen === false ? true : false;
-                          setUser(prev => ({...prev, showLastSeen: newVal}));
-                          updateDoc(doc(db,'artifacts',appId,'public','data',USERS_COL,user.username), { showLastSeen: newVal, status: newVal ? 'online' : Date.now(), lastActiveTS: Date.now() }).catch( console .error);
-                          const creds =  JSON .parse( localStorage .getItem('aura_creds') || '{}');
-                          creds.showLastSeen = newVal;
-                          localStorage .setItem('aura_creds',  JSON .stringify(creds));
+                        <div onClick={() => { 
+                          const newVal = user.showLastSeen === false ? true : false; 
+                          setUser(prev => ({...prev, showLastSeen: newVal})); 
+                          updateDoc(doc(db,'artifacts',appId,'public','data',USERS_COL,user.username), { showLastSeen: newVal, status: newVal ? 'online' : Date.now(), lastActiveTS: Date.now() }).catch( console .error); 
+                          const creds =  JSON .parse( localStorage .getItem('aura_creds') || '{}'); 
+                          creds.showLastSeen = newVal; 
+                           localStorage .setItem('aura_creds',  JSON .stringify(creds)); 
                         }} style={{ width: 50, height: 28, borderRadius: 14, background: user.showLastSeen !== false ? '#34C759' : 'rgba(255,255,255,0.1)', position: 'relative', cursor: 'pointer', transition: 'background 0.3s ease' }}>
                           <div style={{ width: 24, height: 24, borderRadius: '50%', background: 'white', position: 'absolute', top: 2, left: user.showLastSeen !== false ? 24 : 2, transition: 'left 0.3s cubic-bezier(0.34, 1.56, 0.64, 1)', boxShadow: '0 2px 5px rgba(0,0,0,0.2)' }}/>
                         </div>
                       </div>
                     </div>
-
+                    
                     <div style={{background:'var(--bg-card)', padding:25, borderRadius:24, border:'1px solid var(--border)', textAlign:'left'}}>
                       <label style={{fontSize:12, textTransform:'uppercase', opacity:0.6, fontWeight:800, letterSpacing:1}}>Кэш и Данные</label>
                       <button onClick={clearAllDialogs} style={{width:'100%', padding:16, marginTop:15, borderRadius:16, background:'rgba(218, 55, 60, 0.1)', color:'#da373c', display:'flex', alignItems:'center', justifyContent:'center', gap:10, fontWeight:700, border:'none', cursor:'pointer'}}>
@@ -1918,40 +1926,40 @@ function MainApp() {
                         <Eraser size={20}/> Очистить локальный кэш
                       </button>
                     </div>
-
+                    
                     <button className="btn-aura-action" style={{background:'#FF3B30'}} onClick={()=>{  localStorage .clear();  window .location.reload()}}>ВЫЙТИ ИЗ АККАУНТА</button>
                   </div>
                 </div>
               </div>
           )}
-
+          
           {contextMenu && (
-              <div style={{position:'fixed', inset:0, zIndex:5000}} onClick={()=>setContextMenu(null)}>
-                <div className="context-menu" style={{top:contextMenu.rect.top, left: contextMenu.type === 'msg' ? contextMenu.rect.left - 100 : contextMenu.rect.left + 50}}>
-                  {contextMenu.type === 'msg' ? (
-                      <>
-                        <div style={{padding:'10px', display:'flex', gap:8, borderBottom:'1px solid var(--border)', justifyContent:'center'}}>
-                          {['❤️','👍','🔥','😮','😡'].map(emo => (
-                              <button key={emo} style={{fontSize:20}} onClick={()=>{ updateDoc(doc(db,'artifacts',appId,'public','data',MESSAGES_COL,contextMenu.id), {[`reactions.${user.username}`]: emo}); setContextMenu(null); }}>{emo}</button>
-                          ))}
-                        </div>
-                        <button className="context-item" onClick={()=>{setReplyTo(contextMenu.item); setContextMenu(null);}}><Reply size={16}/> Ответить</button>
-                        <button className="context-item" onClick={()=>{updateDoc(doc(db,'artifacts',appId,'public','data',MESSAGES_COL,contextMenu.id), {isPinned: !contextMenu.item.isPinned}); setContextMenu(null);}}><Pin size={16}/> {contextMenu.item.isPinned ? 'Открепить' : 'Закрепить'}</button>
-                        {contextMenu.item.uid === user.username && <button className="context-item" onClick={()=>{setEditingMsg(contextMenu.item); setInput(typeof contextMenu.item.text === 'string' ? contextMenu.item.text : ''); setContextMenu(null);}}><Edit3 size={16}/> Изменить</button>}
-                        <button className="context-item danger" onClick={()=>{ updateDoc(doc(db,'artifacts',appId,'public','data',MESSAGES_COL,contextMenu.id), {hiddenFor: arrayUnion(user.username)}); setContextMenu(null); }}><Trash size={16}/> Удалить у себя</button>
-                        {(contextMenu.item.uid === user.username || user.role === 'admin') && <button className="context-item danger" onClick={()=>{ deleteDoc(doc(db,'artifacts',appId,'public','data',MESSAGES_COL,contextMenu.id)); setContextMenu(null); }}><Trash2 size={16}/> Удалить у всех</button>}
-                      </>
-                  ) : (
-                      <>
-                        <button className="context-item" onClick={()=>{ togglePinChat(contextMenu.item.username); setContextMenu(null); }}><Pin size={16}/> {user.pinnedChats?.includes(contextMenu.item.username) ? 'Открепить диалог' : 'Закрепить диалог'}</button>
-                        <button className="context-item danger" onClick={()=>{ deleteDialog(contextMenu.item.username, false); setContextMenu(null); }}><Trash size={16}/> Удалить у себя</button>
-                        <button className="context-item danger" onClick={()=>{ deleteDialog(contextMenu.item.username, true); setContextMenu(null); }}><Trash2 size={16}/> Удалить у обоих</button>
-                      </>
-                  )}
-                </div>
+            <div style={{position:'fixed', inset:0, zIndex:5000}} onClick={()=>setContextMenu(null)}>
+              <div className="context-menu" style={{top:contextMenu.rect.top, left: contextMenu.type === 'msg' ? contextMenu.rect.left - 100 : contextMenu.rect.left + 50}}>
+                {contextMenu.type === 'msg' ? (
+                  <>
+                    <div style={{padding:'10px', display:'flex', gap:8, borderBottom:'1px solid var(--border)', justifyContent:'center'}}>
+                      {['❤️','👍','🔥','😮','😡'].map(emo => (
+                        <button key={emo} style={{fontSize:20}} onClick={()=>{ updateDoc(doc(db,'artifacts',appId,'public','data',MESSAGES_COL,contextMenu.id), {[`reactions.${user.username}`]: emo}); setContextMenu(null); }}>{emo}</button>
+                      ))}
+                    </div>
+                    <button className="context-item" onClick={()=>{setReplyTo(contextMenu.item); setContextMenu(null);}}><Reply size={16}/> Ответить</button>
+                    <button className="context-item" onClick={()=>{updateDoc(doc(db,'artifacts',appId,'public','data',MESSAGES_COL,contextMenu.id), {isPinned: !contextMenu.item.isPinned}); setContextMenu(null);}}><Pin size={16}/> {contextMenu.item.isPinned ? 'Открепить' : 'Закрепить'}</button>
+                    {contextMenu.item.uid === user.username && <button className="context-item" onClick={()=>{setEditingMsg(contextMenu.item); setInput(typeof contextMenu.item.text === 'string' ? contextMenu.item.text : ''); setContextMenu(null);}}><Edit3 size={16}/> Изменить</button>}
+                    <button className="context-item danger" onClick={()=>{ updateDoc(doc(db,'artifacts',appId,'public','data',MESSAGES_COL,contextMenu.id), {hiddenFor: arrayUnion(user.username)}); setContextMenu(null); }}><Trash size={16}/> Удалить у себя</button>
+                    {(contextMenu.item.uid === user.username || user.role === 'admin') && <button className="context-item danger" onClick={()=>{ deleteDoc(doc(db,'artifacts',appId,'public','data',MESSAGES_COL,contextMenu.id)); setContextMenu(null); }}><Trash2 size={16}/> Удалить у всех</button>}
+                  </>
+                ) : (
+                  <>
+                    <button className="context-item" onClick={()=>{ togglePinChat(contextMenu.item.username); setContextMenu(null); }}><Pin size={16}/> {user.pinnedChats?.includes(contextMenu.item.username) ? 'Открепить диалог' : 'Закрепить диалог'}</button>
+                    <button className="context-item danger" onClick={()=>{ deleteDialog(contextMenu.item.username, false); setContextMenu(null); }}><Trash size={16}/> Удалить у себя</button>
+                    <button className="context-item danger" onClick={()=>{ deleteDialog(contextMenu.item.username, true); setContextMenu(null); }}><Trash2 size={16}/> Удалить у обоих</button>
+                  </>
+                )}
               </div>
+            </div>
           )}
-
+          
           {/* --- ОБНОВЛЕННЫЙ ЗВОНОК (PEERJS СЕТКА + АНАЛИЗАТОР) --- */}
           {(callSession || groupCall) && (
               <div className={`call-overlay ${isCallMinimized ? 'minimized' : ''}`} onClick={() => isCallMinimized && setIsCallMinimized(false)}>
@@ -1963,11 +1971,11 @@ function MainApp() {
                     </div>
                 ) : groupCall ? (
                     <div style={{position: 'relative', width: '100%', height: '100%', background: '#111214', display: 'flex', flexDirection: 'column'}}>
-
+                      
                       {/* ШАПКА */}
                       <div style={{
-                        position: 'absolute', top: 20, left: '50%', transform: 'translateX(-50%)', zIndex: 20,
-                        background: 'rgba(30, 31, 34, 0.9)', backdropFilter: 'blur(20px)', padding: '6px 6px 6px 16px',
+                        position: 'absolute', top: 20, left: '50%', transform: 'translateX(-50%)', zIndex: 20, 
+                        background: 'rgba(30, 31, 34, 0.9)', backdropFilter: 'blur(20px)', padding: '6px 6px 6px 16px', 
                         borderRadius: 30, display: 'flex', alignItems: 'center', gap: 20, border: '1px solid rgba(255,255,255,0.05)',
                         boxShadow: '0 4px 15px rgba(0,0,0,0.2)'
                       }}>
@@ -1984,101 +1992,96 @@ function MainApp() {
                           <PhoneOff size={14} /> Покинуть
                         </button>
                       </div>
-
+                      
                       {/* АДАПТИВНАЯ СЕТКА УЧАСТНИКОВ */}
                       <div style={{flex: 1, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16, padding: '80px 40px 120px', alignContent: 'center', justifyContent: 'center', overflowY: 'auto'}}>
-
+                        
                         {/* Локальный пользователь */}
                         <div className={`group-tile ${speakingUsers[getCleanPeerId(groupCall.id, user.username)] ? 'speaking-blue' : ''}`} style={{minHeight: 250, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
-                          <video
-                              ref={el => { if (el && localGroupStreamRef.current) el.srcObject = localGroupStreamRef.current; }}
-                              autoPlay muted playsInline
-                              style={{width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0}}
+                          <video 
+                            ref={el => { if (el && localGroupStreamRef.current) el.srcObject = localGroupStreamRef.current; }}
+                            autoPlay muted playsInline 
+                            style={{width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0}}
                           />
                           {!groupCallVideoEnabled && (
-                              <div style={{position: 'absolute', inset: 0, background: '#2b2d31', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1}}>
-                                <img src={safeText(user?.avatar) || `https://api.dicebear.com/7.x/avataaars/svg?seed=${safeText(user?.username)}`} style={{width: 80, height: 80, borderRadius: '50%'}} alt="you" />
-                              </div>
+                            <div style={{position: 'absolute', inset: 0, background: '#2b2d31', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1}}>
+                              <img src={safeText(user?.avatar) || `https://api.dicebear.com/7.x/avataaars/svg?seed=${safeText(user?.username)}`} style={{width: 80, height: 80, borderRadius: '50%'}} alt="you" />
+                            </div>
                           )}
                           <div style={{position: 'absolute', bottom: 12, left: 12, background: 'rgba(0,0,0,0.6)', padding: '4px 8px', borderRadius: 6, fontSize: 13, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, zIndex: 2, color: 'white'}}>
                             {safeText(user?.name || user?.username)} (Вы)
                             {groupCallMuted && <MicMute size={14} color="#da373c" />}
                           </div>
                           {groupCallVideoEnabled && (
-                              <div style={{position: 'absolute', top: 12, right: 12, background: '#da373c', padding: '4px 8px', borderRadius: 6, fontSize: 11, fontWeight: 800, color: 'white', zIndex: 2, letterSpacing: 0.5}}>
-                                В ЭФИРЕ
-                              </div>
+                            <div style={{position: 'absolute', top: 12, right: 12, background: '#da373c', padding: '4px 8px', borderRadius: 6, fontSize: 11, fontWeight: 800, color: 'white', zIndex: 2, letterSpacing: 0.5}}>
+                              В ЭФИРЕ
+                            </div>
                           )}
                         </div>
-
+                        
                         {/* Удаленные пользователи */}
                         {groupCall.participants?.filter(p => p.username !== user.username).map((peer) => {
                           const peerId = getCleanPeerId(groupCall.id, peer.username);
                           const stream = groupRemoteStreams[peerId];
                           const isSpeaking = speakingUsers[peerId];
-
+                          
                           return (
-                              <div key={peer.username} className={`group-tile ${isSpeaking ? 'speaking-blue' : ''}`} style={{minHeight: 250, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
-                                {stream ? (
-                                    <video
-                                        ref={el => { if (el) { el.srcObject = stream; } }}
-                                        autoPlay playsInline
-                                        style={{width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0}}
-                                    />
-                                ) : (
-                                    <div style={{position: 'absolute', inset: 0, background: '#2b2d31', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1}}>
-                                      <img src={safeText(peer.avatar) || `https://api.dicebear.com/7.x/avataaars/svg?seed=${safeText(peer.username)}`} style={{width: 80, height: 80, borderRadius: '50%'}} alt="peer" />
-                                    </div>
-                                )}
-                                <div style={{position: 'absolute', bottom: 12, left: 12, background: 'rgba(0,0,0,0.6)', padding: '4px 8px', borderRadius: 6, fontSize: 13, fontWeight: 600, zIndex: 2, color: 'white'}}>
-                                  {safeText(peer.name)}
+                            <div key={peer.username} className={`group-tile ${isSpeaking ? 'speaking-blue' : ''}`} style={{minHeight: 250, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
+                              {stream ? (
+                                <video 
+                                  ref={el => { if (el) { el.srcObject = stream; } }}
+                                  autoPlay playsInline 
+                                  style={{width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0}}
+                                />
+                              ) : (
+                                <div style={{position: 'absolute', inset: 0, background: '#2b2d31', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1}}>
+                                  <img src={safeText(peer.avatar) || `https://api.dicebear.com/7.x/avataaars/svg?seed=${safeText(peer.username)}`} style={{width: 80, height: 80, borderRadius: '50%'}} alt="peer" />
                                 </div>
-                                {peer.isStreaming && (
-                                    <div style={{position: 'absolute', top: 12, right: 12, background: '#da373c', padding: '4px 8px', borderRadius: 6, fontSize: 11, fontWeight: 800, color: 'white', zIndex: 2, letterSpacing: 0.5}}>
-                                      В ЭФИРЕ
-                                    </div>
-                                )}
-                                {!stream && (
-                                    <div style={{position: 'absolute', top: 12, right: 12, background: 'rgba(0,0,0,0.6)', padding: '4px 10px', borderRadius: 12, fontSize: 11, color: '#b5bac1', fontWeight: 600}}>
-                                      Подключение...
-                                    </div>
-                                )}
+                              )}
+                              <div style={{position: 'absolute', bottom: 12, left: 12, background: 'rgba(0,0,0,0.6)', padding: '4px 8px', borderRadius: 6, fontSize: 13, fontWeight: 600, zIndex: 2, color: 'white'}}>
+                                {safeText(peer.name)}
                               </div>
+                              {peer.isStreaming && (
+                                <div style={{position: 'absolute', top: 12, right: 12, background: '#da373c', padding: '4px 8px', borderRadius: 6, fontSize: 11, fontWeight: 800, color: 'white', zIndex: 2, letterSpacing: 0.5}}>
+                                  В ЭФИРЕ
+                                </div>
+                              )}
+                            </div>
                           );
                         })}
                       </div>
-
-                      {/* НИЖНЯЯ ПАНЕЛЬ УПРАВЛЕНИЯ ЗВОНКОМ */}
+                      
+                      {/* НИЖНЯЯ ПАНЕЛЬ УПРАВЛЕНИЯ ЗВОНКОМ КАК В DISCORD */}
                       <div style={{
                         position: 'absolute', bottom: 30, left: '50%', transform: 'translateX(-50%)',
                         background: '#1e1f22', borderRadius: 16, padding: '8px 16px', display: 'flex',
                         alignItems: 'center', gap: 24, boxShadow: '0 8px 24px rgba(0,0,0,0.4)', zIndex: 50
                       }}>
-                        <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
-                          <div style={{position: 'relative'}}>
-                            <div style={{width: 32, height: 32, borderRadius: '50%', background: '#23a559', display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
-                              <Activity size={16} color="white" />
-                            </div>
-                          </div>
-                          <div style={{display: 'flex', flexDirection: 'column', gap: 2}}>
-                            <span style={{color: '#23a559', fontSize: 13, fontWeight: 700, lineHeight: 1}}>Голосовая связь подключена</span>
-                            <span style={{color: '#949ba4', fontSize: 11, lineHeight: 1}}>Aura Voice • {currentPing > 0 ? `${currentPing} мс` : 'Проверка пинга...'}</span>
-                          </div>
-                        </div>
-
-                        <div style={{width: 1, height: 32, background: 'rgba(255,255,255,0.1)'}} />
-
-                        <div style={{display: 'flex', gap: 12}}>
-                          <button className="btn-call" onClick={toggleGroupMic} style={{background: groupCallMuted ? 'white' : '#2b2d31', color: groupCallMuted ? '#da373c' : 'white', width: 44, height: 44}}>
-                            {groupCallMuted ? <MicMute size={20}/> : <Mic size={20}/>}
-                          </button>
-                          <button className="btn-call" onClick={toggleGroupScreenShare} style={{background: !groupCallVideoEnabled ? 'white' : '#2b2d31', color: !groupCallVideoEnabled ? '#da373c' : 'white', width: 44, height: 44}}>
-                            {groupCallVideoEnabled ? <Video size={20}/> : <Monitor size={20}/>}
-                          </button>
-                          <button className="btn-call" onClick={() => leaveGroupCall(true)} style={{background: '#da373c', color: 'white', width: 44, height: 44}}>
-                            <PhoneOff size={20}/>
-                          </button>
-                        </div>
+                         <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
+                           <div style={{position: 'relative'}}>
+                              <div style={{width: 32, height: 32, borderRadius: '50%', background: '#23a559', display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
+                                <Activity size={16} color="white" />
+                              </div>
+                           </div>
+                           <div style={{display: 'flex', flexDirection: 'column', gap: 2}}>
+                             <span style={{color: '#23a559', fontSize: 13, fontWeight: 700, lineHeight: 1}}>Голосовая связь подключена</span>
+                             <span style={{color: '#949ba4', fontSize: 11, lineHeight: 1}}>Aura Voice • {currentPing > 0 ? `${currentPing} мс` : 'Проверка пинга...'}</span>
+                           </div>
+                         </div>
+              
+                         <div style={{width: 1, height: 32, background: 'rgba(255,255,255,0.1)'}} />
+              
+                         <div style={{display: 'flex', gap: 12}}>
+                           <button className="btn-call" onClick={toggleGroupMic} style={{background: groupCallMuted ? 'white' : '#2b2d31', color: groupCallMuted ? '#da373c' : 'white', width: 44, height: 44}}>
+                              {groupCallMuted ? <MicMute size={20}/> : <Mic size={20}/>}
+                           </button>
+                           <button className="btn-call" onClick={toggleGroupScreenShare} style={{background: !groupCallVideoEnabled ? 'white' : '#2b2d31', color: !groupCallVideoEnabled ? '#da373c' : 'white', width: 44, height: 44}}>
+                              {groupCallVideoEnabled ? <Video size={20}/> : <Monitor size={20}/>}
+                           </button>
+                           <button className="btn-call" onClick={() => leaveGroupCall(true)} style={{background: '#da373c', color: 'white', width: 44, height: 44}}>
+                              <PhoneOff size={20}/>
+                           </button>
+                         </div>
                       </div>
 
                     </div>
@@ -2107,7 +2110,7 @@ function MainApp() {
                             </div>
                           </div>
                       )}
-
+                      
                       <div style={{position:'absolute', bottom:100, display:'flex', gap:10, zIndex: 20, flexWrap: 'wrap', justifyContent:'center', width:'100%'}}>
                         {devices?.audioIn?.length > 0 && (
                             <div className="device-wrapper" onClick={e => e.stopPropagation()}>
@@ -2126,7 +2129,7 @@ function MainApp() {
                             </div>
                         )}
                       </div>
-
+                      
                       <div style={{position:'absolute', bottom:30, display:'flex', gap:15, zIndex: 30}}>
                         <button className="btn-call" onClick={(e) => { e.stopPropagation(); toggleMic(); }} style={{background: callState.micMuted ? '#FF3B30' : 'rgba(255,255,255,0.2)'}}>
                           {callState.micMuted ? <MicMute color="white" size={20}/> : <Mic color="white" size={20}/>}
@@ -2147,41 +2150,41 @@ function MainApp() {
                       </div>
                       {/* PING IN 1 ON 1 CALL */}
                       {callSession.status === 'active' && (
-                          <div style={{position: 'absolute', top: 20, right: 20, zIndex: 50, background: 'rgba(0,0,0,0.6)', padding: '6px 12px', borderRadius: 20, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#34C759', border: '1px solid rgba(255,255,255,0.1)'}}>
+                         <div style={{position: 'absolute', top: 20, right: 20, zIndex: 50, background: 'rgba(0,0,0,0.6)', padding: '6px 12px', borderRadius: 20, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#34C759', border: '1px solid rgba(255,255,255,0.1)'}}>
                             <Activity size={14} />
                             {currentPing > 0 ? `${currentPing} мс` : 'Проверка пинга...'}
-                          </div>
+                         </div>
                       )}
                     </>
                 )}
-
+                
                 {!groupCall && (
-                    <>
-                      <video ref={remoteVideoRef} className="call-video-main" autoPlay playsInline style={{ display: isCallMinimized ? 'none' : 'block' }} />
-                      <video ref={localVideoRef} className="call-video-pip" autoPlay playsInline muted style={{ display: isCallMinimized ? 'none' : 'block' }} />
-                    </>
+                  <>
+                    <video ref={remoteVideoRef} className="call-video-main" autoPlay playsInline style={{ display: isCallMinimized ? 'none' : 'block' }} />
+                    <video ref={localVideoRef} className="call-video-pip" autoPlay playsInline muted style={{ display: isCallMinimized ? 'none' : 'block' }} />
+                  </>
                 )}
               </div>
           )}
-
+          
           {isRecording && (
-              <div style={{position:'fixed', inset:0, background:'rgba(0,0,0,0.9)', zIndex:200000, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center'}}>
-                <div style={{display:'flex', alignItems:'center', gap:15, marginBottom:20}}>
-                  <div style={{width:16, height:16, background:'#FF3B30', borderRadius:'50%', animation:'pulse 1s infinite'}} />
-                  <span style={{fontSize:40, fontWeight:800}}>{Math.floor(recTime/60)}:{(recTime%60).toString().padStart(2,'0')}</span>
-                </div>
-                {isRecording === 'video' && (
-                    <div className="circle-video" style={{marginBottom:30, width: 280, height: 280}}>
-                      <video ref={v => { if(v) v.srcObject = mediaRec.current?.stream; }} autoPlay muted style={{width:'100%', height:'100%', objectFit:'cover', transform:'scaleX(-1)'}} />
-                    </div>
-                )}
-                <div style={{display:'flex', gap:30}}>
-                  <button onClick={()=>{ stopMediaRecording(true); }} style={{background:'rgba(255,255,255,0.1)', color:'white', padding:'16px 40px', borderRadius:25, fontWeight:700, border:'none', cursor:'pointer'}}>ОТМЕНА</button>
-                  <button onClick={()=>stopMediaRecording(false)} style={{background:'var(--aura-red)', color:'white', padding:'16px 50px', borderRadius:25, fontWeight:800, border:'none', cursor:'pointer'}}>ОТПРАВИТЬ</button>
-                </div>
+            <div style={{position:'fixed', inset:0, background:'rgba(0,0,0,0.9)', zIndex:200000, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center'}}>
+              <div style={{display:'flex', alignItems:'center', gap:15, marginBottom:20}}>
+                <div style={{width:16, height:16, background:'#FF3B30', borderRadius:'50%', animation:'pulse 1s infinite'}} />
+                <span style={{fontSize:40, fontWeight:800}}>{Math.floor(recTime/60)}:{(recTime%60).toString().padStart(2,'0')}</span>
               </div>
+              {isRecording === 'video' && (
+                <div className="circle-video" style={{marginBottom:30, width: 280, height: 280}}>
+                  <video ref={v => { if(v) v.srcObject = mediaRec.current?.stream; }} autoPlay muted style={{width:'100%', height:'100%', objectFit:'cover', transform:'scaleX(-1)'}} />
+                </div>
+              )}
+              <div style={{display:'flex', gap:30}}>
+                <button onClick={()=>{ stopMediaRecording(true); }} style={{background:'rgba(255,255,255,0.1)', color:'white', padding:'16px 40px', borderRadius:25, fontWeight:700, border:'none', cursor:'pointer'}}>ОТМЕНА</button>
+                <button onClick={()=>stopMediaRecording(false)} style={{background:'var(--aura-red)', color:'white', padding:'16px 50px', borderRadius:25, fontWeight:800, border:'none', cursor:'pointer'}}>ОТПРАВИТЬ</button>
+              </div>
+            </div>
           )}
-
+          
           {toast && <AuraToast data={toast} onClose={()=>setToast(null)} onClick={()=>{ setSelectedPeer(allUsers.find(u=>u.username===toast.uid)); setView('chats'); setToast(null); }} />}
         </div>
       </div>
@@ -2190,8 +2193,8 @@ function MainApp() {
 
 export default function App() {
   return (
-      <ErrorBoundary>
-        <MainApp />
-      </ErrorBoundary>
+    <ErrorBoundary>
+      <MainApp />
+    </ErrorBoundary>
   );
 }
