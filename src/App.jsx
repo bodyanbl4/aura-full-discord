@@ -1194,8 +1194,8 @@ function MainApp() {
     const callId = `group-${roomName.toLowerCase().replace(/\s+/g, '-')}`;
 
     try {
-      // Получаем токен от Firebase Functions
-      const tokenResponse = await fetch('https://us-central1-aura-748c8.cloudfunctions.net/getLiveKitToken', {
+      // Получаем токен от Vercel
+      const tokenResponse = await fetch('https://aura-full-discord-758l-epu49xalh-bodyanbl4s-projects.vercel.app/api/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1205,10 +1205,15 @@ function MainApp() {
       });
 
       if (!tokenResponse.ok) {
-        throw new Error('Failed to get token from Firebase');
+        const errorText = await tokenResponse.text();
+        throw new Error(`Vercel error: ${errorText}`);
       }
 
       const { token } = await tokenResponse.json();
+
+      if (!token) {
+        throw new Error('No token received from Vercel');
+      }
 
       // LiveKit - минимальная нагрузка на ПК (SFU)
       const room = new Room();
@@ -1253,7 +1258,7 @@ function MainApp() {
 
     } catch (e) {
       console.error("LiveKit error:", e);
-      setToast({name: "Ошибка", text: "Не удалось подключиться к голосовому чату", avatar: ""});
+      setToast({name: "Ошибка", text: `Не удалось подключиться: ${e.message}`, avatar: ""});
     }
   };
 
