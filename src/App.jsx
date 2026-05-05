@@ -69,6 +69,9 @@ const RTC_SERVERS = {
   ]
 };
 
+// Ключ участника в speakingUsers / groupRemoteStreams — обычный username.
+const getCleanPeerId = (_callId, username) => username;
+
 // БЕЗОПАСНЫЙ РЕНДЕР: Защищает React от падения, если вместо строки прилетает объект
 const safeText = (val) => {
   if (val == null) return '';
