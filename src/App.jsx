@@ -649,6 +649,30 @@ function MainApp() {
     const unsubU = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', USERS_COL), s => {
       setAllUsers(s.docs.map(d => d.data()));
     }, err => console.error("Users fetch error:", err));
+
+    // Подписка на собственный документ — без неё friendRequests / friends / typingTo
+    // не обновляются в локальном state когда другой пользователь пишет в наш doc
+    // (например, шлёт нам заявку в друзья). Без этого вкладка «Друзья» тихо отстаёт от Firestore.
+    const ownDocRef = doc(db, 'artifacts', appId, 'public', 'data', USERS_COL, user.username);
+    const unsubOwn = onSnapshot(ownDocRef, (snap) => {
+      if (!snap.exists()) return;
+      const remote = snap.data();
+      setUser(prev => {
+        if (!prev) return remote;
+        const prevReqs = prev.friendRequests || [];
+        const newReqs = remote.friendRequests || [];
+        const fresh = newReqs.filter(r => !prevReqs.includes(r));
+        if (fresh.length > 0) {
+          const requester = fresh[fresh.length - 1];
+          // тост покажет "X отправил заявку"
+          setToast({ name: 'Новая заявка в друзья', text: `${safeText(requester)} хочет добавить вас в друзья`, avatar: '' });
+          if (document.visibilityState === 'hidden' && 'Notification' in window && Notification.permission === 'granted') {
+            try { new Notification('Aura — заявка в друзья', { body: `${safeText(requester)} хочет добавить вас в друзья` }); } catch (e) {}
+          }
+        }
+        return { ...prev, ...remote };
+      });
+    }, err => console.error('Own user doc fetch error:', err));
     
     const unsubServers = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', SERVERS_COL), s => {
       const serverList = s.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -709,7 +733,7 @@ function MainApp() {
       });
     }, err => console.error("Calls fetch error:", err));
     
-    return () => { unsubU(); unsubServers(); unsubG(); unsubM(); unsubC(); unsubL(); };
+    return () => { unsubU(); unsubOwn(); unsubServers(); unsubG(); unsubM(); unsubC(); unsubL(); };
   }, [user?.username, selectedPeer?.username, messages.length, auth.currentUser]);
 
   // АНАЛИЗАТОР ЗВУКА ДЛЯ AURA-СТИЛЯ (Web Audio API)
@@ -2504,7 +2528,34 @@ function MainApp() {
                     </div>
                 ) : groupCall ? (
                     <div style={{position: 'relative', width: '100%', height: '100%', background: '#111214', display: 'flex', flexDirection: 'column'}}>
-                      
+
+                      {/* СКРЫТЫЕ АУДИО-ЭЛЕМЕНТЫ ПО ОДНОМУ НА ПИРА.
+                          Аудио воспроизводится здесь, а не из <video>, потому что:
+                          1) <audio> не блокируется autoplay-policy после клика «Войти»
+                          2) при сворачивании грид/полноэкранном просмотре звук не пропадает
+                          3) deafen и setSinkId применяются к одному месту */}
+                      {Object.entries(groupRemoteStreams).map(([peerId, stream]) => (
+                        <audio
+                          key={`audio-${peerId}`}
+                          ref={(el) => {
+                            if (!el) return;
+                            if (el.srcObject !== stream) {
+                              el.srcObject = stream;
+                              const p = el.play();
+                              if (p && typeof p.catch === 'function') p.catch(() => {});
+                            }
+                            el.muted = !!groupCallDeafened;
+                            el.volume = groupCallDeafened ? 0 : 1;
+                            if (typeof el.setSinkId === 'function' && selectedDevices?.audioOut) {
+                              el.setSinkId(selectedDevices.audioOut).catch(() => {});
+                            }
+                          }}
+                          autoPlay
+                          playsInline
+                          style={{ display: 'none' }}
+                        />
+                      ))}
+
                       {/* ШАПКА */}
                       <div style={{
                         position: 'absolute', top: 20, left: '50%', transform: 'translateX(-50%)', zIndex: 20, 
@@ -2571,14 +2622,15 @@ function MainApp() {
                                 <video
                                   ref={el => {
                                     if (!el) return;
-                                    if (el.srcObject !== stream) el.srcObject = stream;
-                                    el.muted = !!groupCallDeafened;
-                                    if (typeof el.setSinkId === 'function' && selectedDevices.audioOut) {
-                                      el.setSinkId(selectedDevices.audioOut).catch(() => {});
+                                    if (el.srcObject !== stream) {
+                                      el.srcObject = stream;
+                                      const p = el.play();
+                                      if (p && typeof p.catch === 'function') p.catch(() => {});
                                     }
+                                    el.muted = true;
+                                    el.volume = 0;
                                   }}
-                                  autoPlay playsInline
-                                  muted={groupCallDeafened}
+                                  autoPlay playsInline muted
                                   style={{width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0}}
                                 />
                               ) : (
@@ -2612,13 +2664,16 @@ function MainApp() {
                               <video
                                 ref={el => {
                                   if (!el) return;
-                                  if (el.srcObject !== stream) el.srcObject = stream;
-                                  el.muted = isLocal ? true : !!groupCallDeafened;
-                                  if (!isLocal && typeof el.setSinkId === 'function' && selectedDevices.audioOut) {
-                                    el.setSinkId(selectedDevices.audioOut).catch(() => {});
+                                  if (el.srcObject !== stream) {
+                                    el.srcObject = stream;
+                                    const p = el.play();
+                                    if (p && typeof p.catch === 'function') p.catch(() => {});
                                   }
+                                  // Аудио играет через скрытые <audio>, поэтому полноэкранное видео всегда без звука.
+                                  el.muted = true;
+                                  el.volume = 0;
                                 }}
-                                autoPlay playsInline muted={isLocal || groupCallDeafened}
+                                autoPlay playsInline muted
                                 style={{width:'100%', height:'100%', objectFit:'contain', background:'#000'}}
                               />
                             ) : (
