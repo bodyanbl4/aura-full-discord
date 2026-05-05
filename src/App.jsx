@@ -505,7 +505,10 @@ function MainApp() {
   const [groupConnections, setGroupConnections] = useState({}); 
   const [groupRemoteStreams, setGroupRemoteStreams] = useState({}); 
   const [groupCallMuted, setGroupCallMuted] = useState(false);
-  const [groupCallVideoEnabled, setGroupCallVideoEnabled] = useState(false); 
+  const [groupCallVideoEnabled, setGroupCallVideoEnabled] = useState(false);
+  const [groupCallDeafened, setGroupCallDeafened] = useState(false);
+  const wasMutedBeforeDeafenRef = useRef(false);
+  const [expandedTileUser, setExpandedTileUser] = useState(null); // username полноэкранной плитки или null 
   const [micDenied, setMicDenied] = useState(false);
   const localGroupStreamRef = useRef(null);
   const screenShareTracksRef = useRef(null);
@@ -877,6 +880,21 @@ function MainApp() {
       resolveScreenPicker(null);
     }
   }, [groupCall, screenPickerSources]);
+
+  // Esc закрывает полноэкранный просмотр плитки участника.
+  useEffect(() => {
+    if (!expandedTileUser) return;
+    const onKey = (e) => { if (e.key === 'Escape') setExpandedTileUser(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [expandedTileUser]);
+
+  // Если участник, чью плитку мы развернули, покинул канал — выходим из полноэкранного режима.
+  useEffect(() => {
+    if (!expandedTileUser || !groupCall) return;
+    const stillThere = expandedTileUser === user?.username || groupCall.participants?.some(p => p.username === expandedTileUser);
+    if (!stillThere) setExpandedTileUser(null);
+  }, [expandedTileUser, groupCall, user?.username]);
 
   // Слушатель событий авто-обновления (Discord-style: фоновое скачивание + полоска внизу).
   useEffect(() => {
@@ -1541,6 +1559,30 @@ function MainApp() {
     }
     setGroupCallMuted(isMuted);
     playTone(isMuted ? 'mute' : 'unmute');
+  };
+
+  // Discord-style deafen: глушим входящий звук от всех пиров и автоматически мьютим свой микрофон.
+  // Снятие deafen возвращает микрофон в то состояние, в котором он был до оглушения.
+  const toggleGroupDeafen = () => {
+    const next = !groupCallDeafened;
+    if (next) {
+      wasMutedBeforeDeafenRef.current = groupCallMuted;
+      if (!groupCallMuted) {
+        if (localGroupStreamRef.current) {
+          localGroupStreamRef.current.getAudioTracks().forEach(t => { t.enabled = false; });
+        }
+        setGroupCallMuted(true);
+      }
+    } else {
+      if (!wasMutedBeforeDeafenRef.current) {
+        if (localGroupStreamRef.current) {
+          localGroupStreamRef.current.getAudioTracks().forEach(t => { t.enabled = true; });
+        }
+        setGroupCallMuted(false);
+      }
+    }
+    setGroupCallDeafened(next);
+    playTone(next ? 'mute' : 'unmute');
   };
 
   const toggleGroupScreenShare = async () => {
@@ -2488,7 +2530,7 @@ function MainApp() {
                       <div style={{flex: 1, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 220px))', gridAutoRows: '150px', gap: 12, padding: '80px 24px 120px', alignContent: 'flex-start', justifyContent: 'center', overflowY: 'auto'}}>
 
                         {/* Локальный пользователь */}
-                        <div className={`group-tile ${speakingUsers[getCleanPeerId(groupCall.id, user.username)] ? 'speaking-blue' : ''}`} style={{display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden', borderRadius: 12}}>
+                        <div onClick={() => setExpandedTileUser(user.username)} title="Раскрыть на весь экран" className={`group-tile ${speakingUsers[getCleanPeerId(groupCall.id, user.username)] ? 'speaking-blue' : ''}`} style={{display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden', borderRadius: 12, cursor: 'pointer'}}>
                           <video
                             ref={el => {
                               if (!el) return;
@@ -2524,17 +2566,19 @@ function MainApp() {
                           const isSpeaking = speakingUsers[peerId];
                           
                           return (
-                            <div key={peer.username} className={`group-tile ${isSpeaking ? 'speaking-blue' : ''}`} style={{display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden', borderRadius: 12}}>
+                            <div key={peer.username} onClick={() => setExpandedTileUser(peer.username)} title="Раскрыть на весь экран" className={`group-tile ${isSpeaking ? 'speaking-blue' : ''}`} style={{display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden', borderRadius: 12, cursor: 'pointer'}}>
                               {stream ? (
                                 <video
                                   ref={el => {
                                     if (!el) return;
                                     if (el.srcObject !== stream) el.srcObject = stream;
+                                    el.muted = !!groupCallDeafened;
                                     if (typeof el.setSinkId === 'function' && selectedDevices.audioOut) {
                                       el.setSinkId(selectedDevices.audioOut).catch(() => {});
                                     }
                                   }}
                                   autoPlay playsInline
+                                  muted={groupCallDeafened}
                                   style={{width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0}}
                                 />
                               ) : (
@@ -2555,6 +2599,45 @@ function MainApp() {
                         })}
                       </div>
                       
+                      {/* Полноэкранная плитка одного участника (по клику) */}
+                      {expandedTileUser && (() => {
+                        const isLocal = expandedTileUser === user.username;
+                        const peerObj = isLocal ? user : groupCall.participants?.find(p => p.username === expandedTileUser);
+                        const peerId = isLocal ? null : getCleanPeerId(groupCall.id, expandedTileUser);
+                        const stream = isLocal ? localGroupStreamRef.current : groupRemoteStreams[peerId];
+                        const hasVideo = isLocal ? groupCallVideoEnabled : !!stream?.getVideoTracks?.().length;
+                        return (
+                          <div onClick={() => setExpandedTileUser(null)} style={{position:'absolute', inset:0, background:'#000', zIndex:40, display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer'}}>
+                            {stream && hasVideo ? (
+                              <video
+                                ref={el => {
+                                  if (!el) return;
+                                  if (el.srcObject !== stream) el.srcObject = stream;
+                                  el.muted = isLocal ? true : !!groupCallDeafened;
+                                  if (!isLocal && typeof el.setSinkId === 'function' && selectedDevices.audioOut) {
+                                    el.setSinkId(selectedDevices.audioOut).catch(() => {});
+                                  }
+                                }}
+                                autoPlay playsInline muted={isLocal || groupCallDeafened}
+                                style={{width:'100%', height:'100%', objectFit:'contain', background:'#000'}}
+                              />
+                            ) : (
+                              <div style={{display:'flex', flexDirection:'column', alignItems:'center', gap:16}}>
+                                <img src={safeText(peerObj?.avatar) || `https://api.dicebear.com/7.x/avataaars/svg?seed=${safeText(peerObj?.username)}`} style={{width:160, height:160, borderRadius:'50%'}} alt="" />
+                                <div style={{color:'white', fontSize:22, fontWeight:700}}>{safeText(peerObj?.name || peerObj?.username)}</div>
+                                <div style={{color:'#b9bbbe', fontSize:13}}>Нет демонстрации экрана</div>
+                              </div>
+                            )}
+                            <button onClick={(e)=>{ e.stopPropagation(); setExpandedTileUser(null); }} style={{position:'absolute', top:20, right:20, background:'rgba(0,0,0,0.6)', border:'1px solid rgba(255,255,255,0.2)', color:'white', padding:'8px 14px', borderRadius:8, fontSize:13, cursor:'pointer', display:'flex', alignItems:'center', gap:6}}>
+                              <Minimize size={14}/> Свернуть (Esc)
+                            </button>
+                            <div style={{position:'absolute', bottom:20, left:20, background:'rgba(0,0,0,0.6)', padding:'6px 12px', borderRadius:6, color:'white', fontSize:14, fontWeight:600}}>
+                              {safeText(peerObj?.name || peerObj?.username)}{isLocal ? ' (Вы)' : ''}
+                            </div>
+                          </div>
+                        );
+                      })()}
+
                       {/* НИЖНЯЯ ПАНЕЛЬ УПРАВЛЕНИЯ ЗВОНКОМ КАК В DISCORD */}
                       <div style={{
                         position: 'absolute', bottom: 30, left: '50%', transform: 'translateX(-50%)',
@@ -2576,13 +2659,22 @@ function MainApp() {
                          <div style={{width: 1, height: 32, background: 'rgba(255,255,255,0.1)'}} />
               
                          <div style={{display: 'flex', gap: 12}}>
-                           <button className="btn-call" onClick={toggleGroupMic} style={{background: groupCallMuted ? 'white' : '#2b2d31', color: groupCallMuted ? '#da373c' : 'white', width: 44, height: 44}}>
+                           <button title={groupCallMuted ? 'Включить микрофон' : 'Выключить микрофон'} className="btn-call" onClick={toggleGroupMic} style={{background: groupCallMuted ? 'white' : '#2b2d31', color: groupCallMuted ? '#da373c' : 'white', width: 44, height: 44}}>
                               {groupCallMuted ? <MicMute size={20}/> : <Mic size={20}/>}
                            </button>
-                           <button className="btn-call" onClick={toggleGroupScreenShare} style={{background: !groupCallVideoEnabled ? 'white' : '#2b2d31', color: !groupCallVideoEnabled ? '#da373c' : 'white', width: 44, height: 44}}>
+                           <button title={groupCallDeafened ? 'Включить звук' : 'Оглушить (мут всех)'} className="btn-call" onClick={toggleGroupDeafen} style={{background: groupCallDeafened ? 'white' : '#2b2d31', color: groupCallDeafened ? '#da373c' : 'white', width: 44, height: 44, position: 'relative'}}>
+                              <Headphones size={20}/>
+                              {groupCallDeafened && (
+                                <span style={{position:'absolute', top:'50%', left:'50%', width:30, height:2, background:'#da373c', transform:'translate(-50%,-50%) rotate(-45deg)', borderRadius:1}} />
+                              )}
+                           </button>
+                           <button title="Демонстрация экрана" className="btn-call" onClick={toggleGroupScreenShare} style={{background: !groupCallVideoEnabled ? 'white' : '#2b2d31', color: !groupCallVideoEnabled ? '#da373c' : 'white', width: 44, height: 44}}>
                               {groupCallVideoEnabled ? <Video size={20}/> : <Monitor size={20}/>}
                            </button>
-                           <button className="btn-call" onClick={() => leaveGroupCall(true)} style={{background: '#da373c', color: 'white', width: 44, height: 44}}>
+                           <button title="Свернуть в трей" className="btn-call" onClick={() => { if (window.aura?.minimizeToTray) window.aura.minimizeToTray(); }} style={{background: '#2b2d31', color: 'white', width: 44, height: 44}}>
+                              <Minimize size={20}/>
+                           </button>
+                           <button title="Покинуть голосовой канал" className="btn-call" onClick={() => leaveGroupCall(true)} style={{background: '#da373c', color: 'white', width: 44, height: 44}}>
                               <PhoneOff size={20}/>
                            </button>
                          </div>
