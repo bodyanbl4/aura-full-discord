@@ -1,8 +1,16 @@
-const { app, BrowserWindow, shell, ipcMain, Menu, Notification, desktopCapturer } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, Menu, Notification, desktopCapturer, dialog } = require('electron');
 const path = require('node:path');
 const { registerPermissionHandlers } = require('./permissions.cjs');
 const { createTray, destroyTray } = require('./tray.cjs');
-const { initAutoUpdater } = require('./updater.cjs');
+const { initAutoUpdater, installUpdateNow } = require('./updater.cjs');
+
+// Не валим main-процесс на TypeError-ах из Chromium при отмене getDisplayMedia.
+process.on('uncaughtException', (err) => {
+  console.error('[main] uncaughtException:', err);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('[main] unhandledRejection:', err);
+});
 
 const isDev = !app.isPackaged;
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
@@ -24,7 +32,7 @@ function setupDisplayMediaHandler(win) {
         fetchWindowIcons: false,
       });
       if (!sources.length) {
-        callback({});
+        try { callback({}); } catch (e) {}
         return;
       }
       // Если уже есть незакрытая заявка — отменяем её, чтобы не зависнуть.
@@ -38,7 +46,7 @@ function setupDisplayMediaHandler(win) {
         timeout: setTimeout(() => {
           if (pendingDisplayMediaRequest && pendingDisplayMediaRequest.callback === callback) {
             pendingDisplayMediaRequest = null;
-            callback({});
+            try { callback({}); } catch (e) {}
           }
         }, 120000),
       };
@@ -49,9 +57,19 @@ function setupDisplayMediaHandler(win) {
       })));
     } catch (e) {
       console.error('display-media handler error:', e);
-      callback({});
+      try { callback({}); } catch (e2) {}
     }
   }, { useSystemPicker: false });
+}
+
+function safeCallback(callback, payload) {
+  // В Electron 30+ callback({}) кидает TypeError "Video was requested..." при отмене.
+  // Оборачиваем в try/catch, чтобы main-процесс не падал.
+  try {
+    callback(payload);
+  } catch (err) {
+    console.warn('[display-media] callback threw:', err && err.message);
+  }
 }
 
 ipcMain.on('aura:screen-picker-result', (_event, sourceId) => {
@@ -61,18 +79,18 @@ ipcMain.on('aura:screen-picker-result', (_event, sourceId) => {
   if (timeout) clearTimeout(timeout);
 
   if (!sourceId) {
-    callback({});
+    safeCallback(callback, {});
     return;
   }
   const picked = sources.find(s => s.id === sourceId);
   if (!picked) {
-    callback({});
+    safeCallback(callback, {});
     return;
   }
   // audio: 'loopback' — захват системного звука Windows. На macOS Electron вернёт null,
   // что приведёт к падению getDisplayMedia, поэтому включаем только на Windows.
   const includeLoopback = process.platform === 'win32' && picked.id.startsWith('screen:');
-  callback(includeLoopback ? { video: picked, audio: 'loopback' } : { video: picked });
+  safeCallback(callback, includeLoopback ? { video: picked, audio: 'loopback' } : { video: picked });
 });
 
 function createMainWindow() {
@@ -187,4 +205,12 @@ ipcMain.handle('aura:open-external', (_event, url) => {
   if (!/^https?:\/\//.test(url)) return false;
   shell.openExternal(url);
   return true;
+});
+
+ipcMain.handle('aura:install-update', () => {
+  if (typeof installUpdateNow === 'function') {
+    installUpdateNow();
+    return true;
+  }
+  return false;
 });

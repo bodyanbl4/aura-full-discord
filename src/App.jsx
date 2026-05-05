@@ -484,6 +484,8 @@ function MainApp() {
   const [profileDraft, setProfileDraft] = useState({ name: '', avatar: '' });
   const [profileSaving, setProfileSaving] = useState(false);
   const [screenPickerSources, setScreenPickerSources] = useState(null); // null = closed, [] = empty, [...] = open with sources
+  const [updateState, setUpdateState] = useState(null); // null | { stage: 'downloading'|'ready', progress?, version? }
+  const [updateBarDismissed, setUpdateBarDismissed] = useState(false);
   const [callState, setCallState] = useState({ micMuted: false, screenShare: false });
   const [remoteStreamConnected, setRemoteStreamConnected] = useState(false);
   const [currentPing, setCurrentPing] = useState(0); 
@@ -855,6 +857,33 @@ function MainApp() {
   const resolveScreenPicker = (sourceId) => {
     setScreenPickerSources(null);
     if (window.aura?.resolveScreenPicker) window.aura.resolveScreenPicker(sourceId || null);
+  };
+
+  // Слушатель событий авто-обновления (Discord-style: фоновое скачивание + полоска внизу).
+  useEffect(() => {
+    if (!window.aura?.onUpdateEvent) return;
+    const off = window.aura.onUpdateEvent((payload) => {
+      if (!payload || !payload.type) return;
+      if (payload.type === 'available') {
+        setUpdateState({ stage: 'downloading', progress: 0, version: payload.info?.version });
+        setUpdateBarDismissed(false);
+      } else if (payload.type === 'progress') {
+        setUpdateState((prev) => prev ? { ...prev, stage: 'downloading', progress: Math.round(payload.progress?.percent || 0) } : prev);
+      } else if (payload.type === 'downloaded') {
+        setUpdateState({ stage: 'ready', progress: 100, version: payload.info?.version });
+        setUpdateBarDismissed(false);
+      } else if (payload.type === 'error') {
+        // тихо игнорируем — баннер просто не покажется
+        setUpdateState(null);
+      }
+    });
+    return off;
+  }, []);
+
+  const installUpdateNow = async () => {
+    if (window.aura?.installUpdate) {
+      try { await window.aura.installUpdate(); } catch (e) {}
+    }
   };
 
   // Синхронизируем драфт профиля с актуальным user, когда открывается экран настроек.
@@ -2627,6 +2656,37 @@ function MainApp() {
           )}
           
           {toast && <AuraToast data={toast} onClose={()=>setToast(null)} onClick={()=>{ setSelectedPeer(allUsers.find(u=>u.username===toast.uid)); setView('chats'); setToast(null); }} />}
+
+          {/* Discord-style полоска обновления внизу */}
+          {updateState && !updateBarDismissed && (
+            <div style={{
+              position:'fixed', bottom:0, left:0, right:0, zIndex:9998,
+              background: updateState.stage === 'ready' ? '#3ba55d' : '#5865F2',
+              color:'white', padding:'10px 20px',
+              display:'flex', alignItems:'center', justifyContent:'center', gap:16,
+              fontSize:14, fontWeight:600, boxShadow:'0 -4px 16px rgba(0,0,0,0.3)',
+            }}>
+              {updateState.stage === 'downloading' ? (
+                <>
+                  <RefreshCw size={16} className="animate-spin" />
+                  <span>Загружается обновление{updateState.version ? ` ${updateState.version}` : ''}… {updateState.progress || 0}%</span>
+                </>
+              ) : (
+                <>
+                  <span>✨ Обновление{updateState.version ? ` ${updateState.version}` : ''} готово к установке</span>
+                  <button
+                    onClick={installUpdateNow}
+                    style={{background:'rgba(255,255,255,0.2)', color:'white', border:'1px solid rgba(255,255,255,0.4)', padding:'4px 14px', borderRadius:4, cursor:'pointer', fontWeight:700}}
+                  >Перезапустить сейчас</button>
+                  <button
+                    onClick={()=>setUpdateBarDismissed(true)}
+                    title="Установится при выходе"
+                    style={{background:'transparent', color:'white', border:'none', cursor:'pointer', fontSize:18, marginLeft:4, opacity:0.8}}
+                  >×</button>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Пикер демонстрации экрана (Electron) */}
           {screenPickerSources && (

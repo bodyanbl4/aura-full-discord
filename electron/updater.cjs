@@ -1,5 +1,7 @@
 const { app } = require('electron');
 
+let cachedAutoUpdater = null;
+
 function safeRequireUpdater() {
   try {
     return require('electron-updater');
@@ -26,6 +28,8 @@ function initAutoUpdater(getMainWindow) {
   if (!mod || !mod.autoUpdater) return;
 
   const { autoUpdater } = mod;
+  cachedAutoUpdater = autoUpdater;
+  // Фоновое скачивание без диалогов. quitAndInstall сам вызовется при выходе из приложения.
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
@@ -36,13 +40,24 @@ function initAutoUpdater(getMainWindow) {
   autoUpdater.on('download-progress', (progress) => send(getMainWindow, { type: 'progress', progress }));
   autoUpdater.on('update-downloaded', (info) => send(getMainWindow, { type: 'downloaded', info }));
 
-  autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+  // checkForUpdates (без AndNotify) — мы сами рисуем баннер в renderer'е, не нужно ОС-нотификаций.
+  autoUpdater.checkForUpdates().catch((err) => {
     console.warn('[updater] initial check failed:', err && err.message);
   });
 
   setInterval(() => {
-    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    autoUpdater.checkForUpdates().catch(() => {});
   }, 30 * 60 * 1000);
 }
 
-module.exports = { initAutoUpdater };
+function installUpdateNow() {
+  if (!cachedAutoUpdater) return;
+  // (isSilent=true, isForceRunAfter=true) — тихая установка и запуск приложения сразу после.
+  try {
+    cachedAutoUpdater.quitAndInstall(true, true);
+  } catch (err) {
+    console.warn('[updater] quitAndInstall failed:', err && err.message);
+  }
+}
+
+module.exports = { initAutoUpdater, installUpdateNow };
