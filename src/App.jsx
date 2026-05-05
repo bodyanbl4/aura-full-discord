@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp, getApps } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, addDoc, updateDoc, deleteDoc, query, where, arrayUnion, getDocs } from 'firebase/firestore';
+import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, addDoc, updateDoc, deleteDoc, query, where, arrayUnion, arrayRemove, getDocs } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 
 import {
@@ -9,7 +9,8 @@ import {
   PhoneForwarded, PhoneCall, ChevronLeft, Video, Info, Pin, X, Check,
   CheckCheck, File as FileIcon, Download, RefreshCw, Paperclip, Send,
   Camera, Mic, Image as ImageIcon, Music, Play, Pause, Settings, Eraser,
-  MicOff as MicMute, Monitor, PhoneOff, Trash, Trash2, Reply, Edit3, Bell, Minimize, Maximize, Volume2, Activity
+  MicOff as MicMute, Monitor, PhoneOff, Trash, Trash2, Reply, Edit3, Bell, Minimize, Maximize, Volume2, Activity,
+  Users, UserPlus, UserCheck, UserX, Headphones, Save
 } from 'lucide-react';
 
 const firebaseConfig = {
@@ -34,31 +35,59 @@ const MESSAGES_COL = 'aura_messages_v3';
 const CALLS_COL = 'aura_calls_v3';
 const SERVERS_COL = 'aura_servers_v3';
 
-// ЗВУКИ ЧЕРЕЗ WEB AUDIO API (100% надежность, без блокировок скачивания)
+// ЗВУКИ ЧЕРЕЗ WEB AUDIO API — синтетические аналоги звуков Discord
+// Аккуратные двухтоновые цепочки, чтобы не дребезжало и звучало похоже на UI Discord.
+const _audioCtx = (() => {
+  let ctx = null;
+  return () => {
+    if (typeof window === 'undefined') return null;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    if (!ctx) ctx = new AC();
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    return ctx;
+  };
+})();
+
+const _playBlip = (ctx, freq, startAt, duration = 0.08, peakGain = 0.18, oscType = 'sine') => {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = oscType;
+  osc.frequency.setValueAtTime(freq, startAt);
+  // Быстрый attack + плавный release — приятный "клик" вместо щелчка.
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.exponentialRampToValueAtTime(peakGain, startAt + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(startAt);
+  osc.stop(startAt + duration + 0.02);
+};
+
 const playTone = (type) => {
   try {
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContext) return;
-    const ctx = new AudioContext();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.type = 'sine';
-    if (type === 'mute') {
-      osc.frequency.setValueAtTime(400, ctx.currentTime);
-      osc.frequency.exponentialRampToValueAtTime(200, ctx.currentTime + 0.1);
-    } else if (type === 'unmute') {
-      osc.frequency.setValueAtTime(200, ctx.currentTime);
-      osc.frequency.exponentialRampToValueAtTime(400, ctx.currentTime + 0.1);
+    const ctx = _audioCtx();
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    if (type === 'join') {
+      // Подключение к голосовому: два восходящих тона (D5 -> A5).
+      _playBlip(ctx, 587.33, t,        0.10, 0.14, 'triangle');
+      _playBlip(ctx, 880.00, t + 0.10, 0.13, 0.14, 'triangle');
     } else if (type === 'leave') {
-      osc.frequency.setValueAtTime(500, ctx.currentTime);
-      osc.frequency.exponentialRampToValueAtTime(300, ctx.currentTime + 0.2);
+      // Отключение: два нисходящих тона (A5 -> D5).
+      _playBlip(ctx, 880.00, t,        0.10, 0.14, 'triangle');
+      _playBlip(ctx, 587.33, t + 0.10, 0.13, 0.14, 'triangle');
+    } else if (type === 'mute') {
+      // Микрофон выключен: короткий низкий клик.
+      _playBlip(ctx, 320, t, 0.07, 0.16, 'sine');
+    } else if (type === 'unmute') {
+      // Микрофон включен: короткий высокий клик.
+      _playBlip(ctx, 720, t, 0.07, 0.16, 'sine');
+    } else {
+      // Универсальный лёгкий "пинг" для уведомлений и т.п.
+      _playBlip(ctx, 880, t,        0.06, 0.10, 'sine');
+      _playBlip(ctx, 660, t + 0.06, 0.08, 0.10, 'sine');
     }
-    gain.gain.setValueAtTime(0.1, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
-    osc.start(ctx.currentTime);
-    osc.stop(ctx.currentTime + 0.2);
   } catch (e) {}
 };
 
@@ -444,7 +473,19 @@ function MainApp() {
   const [callDuration, setCallDuration] = useState(0);
   const [isCallMinimized, setIsCallMinimized] = useState(false);
   const [devices, setDevices] = useState({ audioIn: [], audioOut: [], videoIn: [] });
-  const [selectedDevices, setSelectedDevices] = useState({ audioIn: '', audioOut: '', videoIn: '' });
+  const [selectedDevices, setSelectedDevices] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('aura_devices') || '{}');
+      return { audioIn: saved.audioIn || '', audioOut: saved.audioOut || '', videoIn: saved.videoIn || '' };
+    } catch (e) {
+      return { audioIn: '', audioOut: '', videoIn: '' };
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('aura_devices', JSON.stringify(selectedDevices)); } catch (e) {}
+  }, [selectedDevices]);
+  const [profileDraft, setProfileDraft] = useState({ name: '', avatar: '' });
+  const [profileSaving, setProfileSaving] = useState(false);
   const [callState, setCallState] = useState({ micMuted: false, screenShare: false });
   const [remoteStreamConnected, setRemoteStreamConnected] = useState(false);
   const [currentPing, setCurrentPing] = useState(0); 
@@ -768,23 +809,82 @@ function MainApp() {
     }
   }, [selectedDevices.audioOut, callSession?.status]);
 
-  const getMediaDevices = async () => {
+  const getMediaDevices = async (requestPermission = false) => {
     try {
       if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
-      const devs = await navigator.mediaDevices.enumerateDevices();
-      setDevices({
-        audioIn: devs.filter(d => d.kind === 'audioinput') || [],
-        audioOut: devs.filter(d => d.kind === 'audiooutput') || [],
-        videoIn: devs.filter(d => d.kind === 'videoinput') || []
-      });
-      if(devs.length) {
-        setSelectedDevices({
-          audioIn: devs.find(d => d.kind === 'audioinput')?.deviceId || '',
-          audioOut: devs.find(d => d.kind === 'audiooutput')?.deviceId || '',
-          videoIn: devs.find(d => d.kind === 'videoinput')?.deviceId || ''
-        });
+      // Без gUM браузеры отдают пустые labels у устройств, поэтому при явном
+      // нажатии "Обновить" просим разрешение на микрофон один раз.
+      if (requestPermission) {
+        try {
+          const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
+          tmp.getTracks().forEach(t => t.stop());
+        } catch (e) { /* юзер мог отказать — продолжим без labels */ }
       }
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      const audioIn = devs.filter(d => d.kind === 'audioinput');
+      const audioOut = devs.filter(d => d.kind === 'audiooutput');
+      const videoIn = devs.filter(d => d.kind === 'videoinput');
+      setDevices({ audioIn, audioOut, videoIn });
+      // Заполняем дефолты только для пустых значений, чтобы не затирать выбор пользователя.
+      setSelectedDevices(prev => ({
+        audioIn: prev.audioIn || audioIn[0]?.deviceId || '',
+        audioOut: prev.audioOut || audioOut[0]?.deviceId || '',
+        videoIn: prev.videoIn || videoIn[0]?.deviceId || ''
+      }));
     } catch (e) {}
+  };
+
+  // Подтянуть устройства один раз при монтировании, чтобы дропдауны в настройках были живые.
+  useEffect(() => {
+    getMediaDevices();
+    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+      const handler = () => getMediaDevices();
+      navigator.mediaDevices.addEventListener('devicechange', handler);
+      return () => navigator.mediaDevices.removeEventListener('devicechange', handler);
+    }
+  }, []);
+
+  // Синхронизируем драфт профиля с актуальным user, когда открывается экран настроек.
+  useEffect(() => {
+    if (view === 'settings' && user) {
+      setProfileDraft({ name: user.name || '', avatar: user.avatar || '' });
+    }
+  }, [view, user?.name, user?.avatar]);
+
+  const saveProfile = async () => {
+    if (!user) return;
+    const trimmedName = (profileDraft.name || '').trim();
+    if (!trimmedName) { alert('Имя не может быть пустым'); return; }
+    setProfileSaving(true);
+    try {
+      const updates = { name: trimmedName, avatar: profileDraft.avatar || '' };
+      await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', USERS_COL, user.username), updates);
+      setUser(prev => ({ ...prev, ...updates }));
+      try {
+        const creds = JSON.parse(localStorage.getItem('aura_creds') || '{}');
+        creds.name = trimmedName;
+        creds.avatar = updates.avatar;
+        localStorage.setItem('aura_creds', JSON.stringify(creds));
+      } catch (e) {}
+      setToast({ name: 'Профиль обновлён', text: 'Изменения сохранены', avatar: updates.avatar });
+    } catch (e) {
+      console.error(e);
+      alert('Не удалось сохранить: ' + e.message);
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
+  const handleAvatarFileUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const compressed = await compressImage(file);
+      setProfileDraft(prev => ({ ...prev, avatar: compressed }));
+    } catch (err) {
+      console.error(err);
+      alert('Не удалось загрузить изображение');
+    }
   };
 
   const handleAuth = async () => {
@@ -1229,7 +1329,8 @@ function MainApp() {
       // 1. Получаем микрофон
       let localStream;
       try {
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const audioConstraint = selectedDevices.audioIn ? { deviceId: { exact: selectedDevices.audioIn } } : true;
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint, video: false });
         setMicDenied(false);
       } catch (e) {
         localStream = null; // режим слушателя
@@ -1318,7 +1419,7 @@ function MainApp() {
 
       setGroupCall({ id: callId, name: roomName, participants: currentParticipants, status: 'active' });
       setIsCallMinimized(false);
-      playTone('unmute');
+      playTone('join');
 
     } catch (e) {
       console.error("WebRTC group call error:", e);
@@ -1539,7 +1640,7 @@ function MainApp() {
         {isDraggingFile && (<div className="drag-overlay"><Download size={60} color="var(--aura-red)" /><h2 style={{fontSize: 24, fontWeight: 700}}>Отпустите файл для отправки</h2></div>)}
         <div className="app-container">
           
-          <div className={`sidebar ${selectedPeer && (view === 'chats' || view === 'calls' || view === 'server') ? 'hide' : ''}`}>
+          <div className={`sidebar ${selectedPeer && (view === 'chats' || view === 'friends' || view === 'server') ? 'hide' : ''}`}>
             
             <div style={{width: '72px', background: '#202225', display: 'flex', flexDirection: 'column', alignItems: 'center', paddingTop: '12px', gap: '8px', borderRight: '1px solid var(--border)', flexShrink: 0, zIndex: 10, overflowY: 'auto'}}>
               <button onClick={() => { setView('chats'); setSelectedPeer(null); }} style={{width:48, height:48, borderRadius: view === 'chats' ? '16px' : '50%', background: '#5865F2', display:'flex', alignItems:'center', justifyContent:'center', border: 'none', marginBottom: '8px', cursor: 'pointer', transition: 'all 0.2s'}}>
@@ -1644,7 +1745,7 @@ function MainApp() {
                             id="add-friend-input"
                             style={{flex: 1, fontSize: 13}}
                           />
-                          <button 
+                          <button
                             onClick={async () => {
                               const input = document.getElementById('add-friend-input').value.trim();
                               if (!input.includes('#')) {
@@ -1652,23 +1753,39 @@ function MainApp() {
                                 return;
                               }
                               const [name, disc] = input.split('#');
-                              const found = allUsers.find(u => 
-                                safeText(u.name).toLowerCase() === name.toLowerCase() && 
+                              const found = allUsers.find(u =>
+                                safeText(u.name).toLowerCase() === name.toLowerCase() &&
                                 String(u.discriminator) === disc
                               );
-                              if (found) {
-                                const currentFriends = user.friends || [];
-                                if (!currentFriends.includes(found.username)) {
-                                  const newFriends = [...currentFriends, found.username];
-                                  await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', USERS_COL, user.username), { friends: newFriends });
-                                  setUser(prev => ({...prev, friends: newFriends}));
-                                  alert(`✅ ${safeText(found.name)}#${safeText(found.discriminator)} добавлен в друзья!`);
-                                } else {
-                                  alert('Уже в друзьях');
-                                }
-                                document.getElementById('add-friend-input').value = '';
-                              } else {
+                              if (!found) {
                                 alert('Пользователь не найден');
+                                return;
+                              }
+                              if (found.username === user.username) {
+                                alert('Нельзя добавить самого себя');
+                                return;
+                              }
+                              if ((user.friends || []).includes(found.username)) {
+                                alert('Уже в друзьях');
+                                return;
+                              }
+                              if ((found.friendRequests || []).includes(user.username)) {
+                                alert('Заявка уже отправлена');
+                                return;
+                              }
+                              if ((user.friendRequests || []).includes(found.username)) {
+                                alert(`${safeText(found.name)} уже отправил вам заявку — примите её во вкладке «Друзья».`);
+                                return;
+                              }
+                              try {
+                                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', USERS_COL, found.username), {
+                                  friendRequests: arrayUnion(user.username)
+                                });
+                                document.getElementById('add-friend-input').value = '';
+                                setToast({ name: 'Заявка отправлена', text: `${safeText(found.name)}#${safeText(found.discriminator)} получит уведомление`, avatar: safeText(found.avatar) });
+                              } catch (e) {
+                                console.error(e);
+                                alert('Не удалось отправить заявку: ' + e.message);
                               }
                             }}
                             style={{background: '#43b581', color: 'white', padding: '8px 16px', borderRadius: 12, fontSize: 13, fontWeight: 600, border: 'none', cursor: 'pointer'}}>
@@ -1692,22 +1809,68 @@ function MainApp() {
                     </div>
                 )}
                 
-                {view === 'calls' && (
+                {view === 'friends' && (
                     <div style={{flex:1, overflowY:'auto', padding: 20}}>
-                      <h3 style={{fontSize: 13, textTransform: 'uppercase', color: 'var(--text-sec)', marginBottom: 20, letterSpacing: 1}}>ИСТОРИЯ ЗВОНКОВ</h3>
-                      {callLogs.length === 0 ? (
-                          <div style={{textAlign: 'center', marginTop: 100, opacity: 0.3}}><Phone size={60} style={{margin: '0 auto 15px'}} /><p>Нет звонков</p></div>
-                      ) : callLogs.map(log => {
-                        const isIncoming = log.callee === user.username;
-                        const peerName = isIncoming ? log.caller : log.callee;
-                        const peerData = allUsers.find(u => u.username === peerName);
-                        const isMissed = log.status === 'calling' || log.status === 'rejected' || (log.status === 'ended' && !log.answer);
+                      {(user.friendRequests || []).length > 0 && (
+                        <>
+                          <h3 style={{fontSize: 13, textTransform: 'uppercase', color: 'var(--text-sec)', marginBottom: 12, letterSpacing: 1}}>ВХОДЯЩИЕ ЗАЯВКИ — {(user.friendRequests || []).length}</h3>
+                          {(user.friendRequests || []).map(reqUsername => {
+                            const reqUser = allUsers.find(u => u.username === reqUsername) || { username: reqUsername, name: reqUsername, avatar: '', discriminator: '' };
+                            const acceptRequest = async () => {
+                              try {
+                                const userRef = doc(db, 'artifacts', appId, 'public', 'data', USERS_COL, user.username);
+                                const otherRef = doc(db, 'artifacts', appId, 'public', 'data', USERS_COL, reqUsername);
+                                await updateDoc(userRef, { friends: arrayUnion(reqUsername), friendRequests: arrayRemove(reqUsername) });
+                                await updateDoc(otherRef, { friends: arrayUnion(user.username) });
+                                playTone('join');
+                              } catch (e) {
+                                console.error(e);
+                                alert('Не удалось принять заявку: ' + e.message);
+                              }
+                            };
+                            const rejectRequest = async () => {
+                              try {
+                                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', USERS_COL, user.username), { friendRequests: arrayRemove(reqUsername) });
+                              } catch (e) {
+                                console.error(e);
+                              }
+                            };
+                            return (
+                              <div key={reqUsername} style={{display: 'flex', alignItems: 'center', gap: 15, marginBottom: 12, padding: 12, background: 'var(--bg-card)', borderRadius: 16, border: '1px solid var(--border)'}}>
+                                <img src={safeText(reqUser.avatar) || `https://api.dicebear.com/7.x/initials/svg?seed=${reqUsername}`} className="avatar" style={{width: 44, height: 44}} alt="req"/>
+                                <div style={{flex: 1, overflow: 'hidden'}}>
+                                  <div style={{fontSize: 15, fontWeight: 700, color: 'var(--text-main)'}}>{safeText(reqUser.name) || reqUsername}{reqUser.discriminator ? `#${safeText(reqUser.discriminator)}` : ''}</div>
+                                  <div style={{fontSize: 12, color: 'var(--text-sec)'}}>хочет добавить вас в друзья</div>
+                                </div>
+                                <button onClick={acceptRequest} title="Принять" style={{width: 36, height: 36, borderRadius: '50%', background: 'rgba(52,199,89,0.15)', border: '1px solid rgba(52,199,89,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer'}}>
+                                  <UserCheck size={18} color="#34C759"/>
+                                </button>
+                                <button onClick={rejectRequest} title="Отклонить" style={{width: 36, height: 36, borderRadius: '50%', background: 'rgba(255,59,48,0.15)', border: '1px solid rgba(255,59,48,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer'}}>
+                                  <UserX size={18} color="#FF3B30"/>
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </>
+                      )}
+                      <h3 style={{fontSize: 13, textTransform: 'uppercase', color: 'var(--text-sec)', margin: (user.friendRequests || []).length > 0 ? '24px 0 12px' : '0 0 12px', letterSpacing: 1}}>ДРУЗЬЯ — {(user.friends || []).length}</h3>
+                      {(user.friends || []).length === 0 ? (
+                          <div style={{textAlign: 'center', marginTop: 60, opacity: 0.3}}><Users size={60} style={{margin: '0 auto 15px'}}/><p>Друзей пока нет — добавьте по тегу Имя#0000 сверху</p></div>
+                      ) : (user.friends || []).map(fUsername => {
+                        const fUser = allUsers.find(u => u.username === fUsername) || { username: fUsername, name: fUsername, avatar: '' };
                         return (
-                            <div key={log.id} style={{display: 'flex', alignItems: 'center', gap: 15, marginBottom: 20}}>
-                              <div style={{width: 44, height: 44, borderRadius: '50%', background: isMissed ? 'rgba(255,59,48,0.15)' : 'rgba(52,199,89,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0}}>{isIncoming ? <PhoneIncoming size={20} color={isMissed ? '#FF3B30' : '#34C759'}/> : <PhoneForwarded size={20} color={isMissed ? '#FF3B30' : '#34C759'}/>}</div>
-                              <div style={{flex: 1, overflow: 'hidden'}}><div style={{fontSize: 16, fontWeight: 700, color: 'var(--text-main)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'}}>{peerData ? safeText(peerData.name) : safeText(peerName)}</div><div style={{fontSize: 13, color: 'var(--text-sec)', marginTop: 2}}>{log.ts ? new Date(log.ts).toLocaleString() : 'Неизвестно'}</div></div>
-                              <button onClick={() => { const p = peerData || {username: peerName, name: peerName, avatar: ''}; setSelectedPeer(p); setView('chats'); }} style={{width: 36, height: 36, borderRadius: '50%', background: 'var(--bg-card)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, cursor: 'pointer'}}><MessageCircle size={16} color="var(--aura-red)" /></button>
-                              <button onClick={() => { const p = peerData || {username: peerName, name: peerName, avatar: ''}; setSelectedPeer(p); setView('chats'); startCall(log.type || 'voice', p); }} style={{width: 36, height: 36, borderRadius: '50%', background: 'var(--bg-card)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, cursor: 'pointer'}}><PhoneCall size={16} color="var(--aura-red)" /></button>                        </div>
+                          <div key={fUsername} style={{display: 'flex', alignItems: 'center', gap: 15, marginBottom: 8, padding: 8, borderRadius: 12, cursor: 'pointer'}} onClick={() => { setSelectedPeer(fUser); setView('chats'); }}>
+                            <div style={{position: 'relative'}}>
+                              <img src={safeText(fUser.avatar) || `https://api.dicebear.com/7.x/initials/svg?seed=${fUsername}`} className="avatar" style={{width: 40, height: 40}} alt="f"/>
+                              {checkIsOnline(fUser) && <div className="status-dot"/>}
+                            </div>
+                            <div style={{flex: 1, overflow: 'hidden'}}>
+                              <div style={{fontSize: 14, fontWeight: 700, color: 'var(--text-main)'}}>{safeText(fUser.name) || fUsername}</div>
+                              <div style={{fontSize: 12, color: 'var(--text-sec)'}}>{checkIsOnline(fUser) ? 'В сети' : 'Не в сети'}</div>
+                            </div>
+                            <button onClick={(e) => { e.stopPropagation(); setSelectedPeer(fUser); setView('chats'); }} style={{width: 32, height: 32, borderRadius: '50%', background: 'var(--bg-card)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer'}}><MessageCircle size={14} color="var(--aura-red)"/></button>
+                            <button onClick={(e) => { e.stopPropagation(); setSelectedPeer(fUser); setView('chats'); startCall('voice', fUser); }} style={{width: 32, height: 32, borderRadius: '50%', background: 'var(--bg-card)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer'}}><PhoneCall size={14} color="var(--aura-red)"/></button>
+                          </div>
                         );
                       })}
                     </div>
@@ -1751,14 +1914,14 @@ function MainApp() {
               
               <div className="tab-bar">
                 <button className={`tab-btn ${view==='chats'?'active':''}`} onClick={()=>{setView('chats'); setSelectedPeer(null);}}><MessageCircle size={24}/>Чаты</button>
-                <button className={`tab-btn ${view==='calls'?'active':''}`} onClick={()=>{setView('calls'); setSelectedPeer(null);}}><Phone size={24}/>Звонки</button>
+                <button className={`tab-btn ${view==='friends'?'active':''}`} onClick={()=>{setView('friends'); setSelectedPeer(null);}}><Users size={24}/>Друзья{(user?.friendRequests || []).length > 0 && <span style={{marginLeft:6, background:'#FF3B30', color:'white', borderRadius:10, padding:'2px 6px', fontSize:11, fontWeight:800}}>{(user?.friendRequests || []).length}</span>}</button>
                 <button className={`tab-btn ${view==='settings'?'active':''}`} onClick={()=>setView('settings')}><Settings size={24}/>Настройки</button>
               </div>
 
             </div>
           </div>
           
-          {(view === 'chats' || view === 'calls' || view === 'server') && (
+          {(view === 'chats' || view === 'friends' || view === 'server') && (
               <div className={`main-stage ${!selectedPeer ? 'hide' : ''}`}>
                 {selectedPeer ? (
                     <div className="chat-wrapper">
@@ -1967,6 +2130,84 @@ function MainApp() {
                     </div>
                     
                     <div style={{background:'var(--bg-card)', padding:25, borderRadius:24, border:'1px solid var(--border)', textAlign:'left'}}>
+                      <label style={{fontSize:12, textTransform:'uppercase', opacity:0.6, fontWeight:800, letterSpacing:1}}>Профиль</label>
+                      <div style={{display:'flex', gap:16, marginTop:16, alignItems:'flex-start'}}>
+                        <div style={{position:'relative', flexShrink:0}}>
+                          <img
+                            src={safeText(profileDraft.avatar) || `https://api.dicebear.com/7.x/initials/svg?seed=${safeText(user?.username)}`}
+                            alt="avatar"
+                            style={{width:80, height:80, borderRadius:'50%', objectFit:'cover', border:'2px solid var(--border)'}}
+                          />
+                          <label style={{position:'absolute', right:-4, bottom:-4, width:28, height:28, borderRadius:'50%', background:'var(--aura-red)', color:'#fff', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer'}}>
+                            <Camera size={14}/>
+                            <input type="file" accept="image/*" onChange={handleAvatarFileUpload} style={{display:'none'}}/>
+                          </label>
+                        </div>
+                        <div style={{flex:1, display:'flex', flexDirection:'column', gap:10}}>
+                          <input
+                            placeholder="Отображаемое имя"
+                            value={profileDraft.name}
+                            onChange={e => setProfileDraft(prev => ({...prev, name: e.target.value}))}
+                            maxLength={32}
+                            style={{padding:'10px 14px', borderRadius:12, background:'var(--bg-main)', border:'1px solid var(--border)', color:'var(--text-main)', fontSize:14}}
+                          />
+                          <input
+                            placeholder="URL аватара (или загрузите файл слева)"
+                            value={profileDraft.avatar}
+                            onChange={e => setProfileDraft(prev => ({...prev, avatar: e.target.value}))}
+                            style={{padding:'10px 14px', borderRadius:12, background:'var(--bg-main)', border:'1px solid var(--border)', color:'var(--text-main)', fontSize:13}}
+                          />
+                          <div style={{fontSize:12, opacity:0.5}}>Логин <b>{safeText(user?.username)}</b>#{String(user?.discriminator || '0000')} нельзя изменить.</div>
+                        </div>
+                      </div>
+                      <button
+                        onClick={saveProfile}
+                        disabled={profileSaving || ((profileDraft.name || '').trim() === (user?.name || '') && (profileDraft.avatar || '') === (user?.avatar || ''))}
+                        style={{width:'100%', padding:14, marginTop:16, borderRadius:14, background:'var(--aura-red)', color:'#fff', fontWeight:700, border:'none', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:8, opacity:profileSaving?0.6:1}}>
+                        <Save size={16}/> {profileSaving ? 'Сохраняем...' : 'Сохранить профиль'}
+                      </button>
+                    </div>
+
+                    <div style={{background:'var(--bg-card)', padding:25, borderRadius:24, border:'1px solid var(--border)', textAlign:'left'}}>
+                      <label style={{fontSize:12, textTransform:'uppercase', opacity:0.6, fontWeight:800, letterSpacing:1}}>Аудио устройства</label>
+                      <p style={{fontSize:13, opacity:0.7, marginTop:5}}>Выбор применяется к голосовым каналам и звонкам.</p>
+
+                      <div style={{display:'flex', alignItems:'center', gap:8, marginTop:14}}>
+                        <Mic size={16} color="var(--text-sec)"/>
+                        <span style={{fontSize:13, fontWeight:600, flex:1}}>Микрофон</span>
+                      </div>
+                      <select
+                        value={selectedDevices.audioIn || ''}
+                        onChange={e => setSelectedDevices(prev => ({...prev, audioIn: e.target.value}))}
+                        style={{width:'100%', padding:'10px 12px', marginTop:6, borderRadius:12, background:'var(--bg-main)', border:'1px solid var(--border)', color:'var(--text-main)', fontSize:13}}>
+                        {devices.audioIn.length === 0 && <option value="">— нажмите «Обновить» и разрешите доступ к микрофону —</option>}
+                        {devices.audioIn.map((d, idx) => (
+                          <option key={d.deviceId || `mic-${idx}`} value={d.deviceId}>{safeText(d.label) || `Микрофон ${idx + 1}`}</option>
+                        ))}
+                      </select>
+
+                      <div style={{display:'flex', alignItems:'center', gap:8, marginTop:14}}>
+                        <Headphones size={16} color="var(--text-sec)"/>
+                        <span style={{fontSize:13, fontWeight:600, flex:1}}>Наушники / Динамики</span>
+                      </div>
+                      <select
+                        value={selectedDevices.audioOut || ''}
+                        onChange={e => setSelectedDevices(prev => ({...prev, audioOut: e.target.value}))}
+                        style={{width:'100%', padding:'10px 12px', marginTop:6, borderRadius:12, background:'var(--bg-main)', border:'1px solid var(--border)', color:'var(--text-main)', fontSize:13}}>
+                        {devices.audioOut.length === 0 && <option value="">— устройства вывода будут видны после первого включения микрофона —</option>}
+                        {devices.audioOut.map((d, idx) => (
+                          <option key={d.deviceId || `out-${idx}`} value={d.deviceId}>{safeText(d.label) || `Динамик ${idx + 1}`}</option>
+                        ))}
+                      </select>
+
+                      <button
+                        onClick={() => getMediaDevices(true)}
+                        style={{width:'100%', padding:12, marginTop:14, borderRadius:12, background:'rgba(88,101,242,0.1)', color:'#5865F2', fontWeight:700, border:'none', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:8}}>
+                        <RefreshCw size={14}/> Обновить список устройств
+                      </button>
+                    </div>
+
+                    <div style={{background:'var(--bg-card)', padding:25, borderRadius:24, border:'1px solid var(--border)', textAlign:'left'}}>
                       <label style={{fontSize:12, textTransform:'uppercase', opacity:0.6, fontWeight:800, letterSpacing:1}}>Кэш и Данные</label>
                       <button onClick={clearAllDialogs} style={{width:'100%', padding:16, marginTop:15, borderRadius:16, background:'rgba(218, 55, 60, 0.1)', color:'#da373c', display:'flex', alignItems:'center', justifyContent:'center', gap:10, fontWeight:700, border:'none', cursor:'pointer'}}>
                         <Trash2 size={20}/> Очистить все диалоги
@@ -2043,10 +2284,10 @@ function MainApp() {
                       </div>
                       
                       {/* АДАПТИВНАЯ СЕТКА УЧАСТНИКОВ */}
-                      <div style={{flex: 1, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16, padding: '80px 40px 120px', alignContent: 'center', justifyContent: 'center', overflowY: 'auto'}}>
-                        
+                      <div style={{flex: 1, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 220px))', gridAutoRows: '150px', gap: 12, padding: '80px 24px 120px', alignContent: 'flex-start', justifyContent: 'center', overflowY: 'auto'}}>
+
                         {/* Локальный пользователь */}
-                        <div className={`group-tile ${speakingUsers[getCleanPeerId(groupCall.id, user.username)] ? 'speaking-blue' : ''}`} style={{minHeight: 250, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
+                        <div className={`group-tile ${speakingUsers[getCleanPeerId(groupCall.id, user.username)] ? 'speaking-blue' : ''}`} style={{display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden', borderRadius: 12}}>
                           <video 
                             ref={el => { if (el && localGroupStreamRef.current) el.srcObject = localGroupStreamRef.current; }}
                             autoPlay muted playsInline 
@@ -2054,7 +2295,7 @@ function MainApp() {
                           />
                           {!groupCallVideoEnabled && (
                             <div style={{position: 'absolute', inset: 0, background: '#2b2d31', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1}}>
-                              <img src={safeText(user?.avatar) || `https://api.dicebear.com/7.x/avataaars/svg?seed=${safeText(user?.username)}`} style={{width: 80, height: 80, borderRadius: '50%'}} alt="you" />
+                              <img src={safeText(user?.avatar) || `https://api.dicebear.com/7.x/avataaars/svg?seed=${safeText(user?.username)}`} style={{width: 60, height: 60, borderRadius: '50%'}} alt="you" />
                             </div>
                           )}
                           <div style={{position: 'absolute', bottom: 12, left: 12, background: 'rgba(0,0,0,0.6)', padding: '4px 8px', borderRadius: 6, fontSize: 13, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6, zIndex: 2, color: 'white'}}>
@@ -2075,16 +2316,22 @@ function MainApp() {
                           const isSpeaking = speakingUsers[peerId];
                           
                           return (
-                            <div key={peer.username} className={`group-tile ${isSpeaking ? 'speaking-blue' : ''}`} style={{minHeight: 250, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
+                            <div key={peer.username} className={`group-tile ${isSpeaking ? 'speaking-blue' : ''}`} style={{display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden', borderRadius: 12}}>
                               {stream ? (
-                                <video 
-                                  ref={el => { if (el) { el.srcObject = stream; } }}
-                                  autoPlay playsInline 
+                                <video
+                                  ref={el => {
+                                    if (!el) return;
+                                    el.srcObject = stream;
+                                    if (typeof el.setSinkId === 'function' && selectedDevices.audioOut) {
+                                      el.setSinkId(selectedDevices.audioOut).catch(() => {});
+                                    }
+                                  }}
+                                  autoPlay playsInline
                                   style={{width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0}}
                                 />
                               ) : (
                                 <div style={{position: 'absolute', inset: 0, background: '#2b2d31', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1}}>
-                                  <img src={safeText(peer.avatar) || `https://api.dicebear.com/7.x/avataaars/svg?seed=${safeText(peer.username)}`} style={{width: 80, height: 80, borderRadius: '50%'}} alt="peer" />
+                                  <img src={safeText(peer.avatar) || `https://api.dicebear.com/7.x/avataaars/svg?seed=${safeText(peer.username)}`} style={{width: 60, height: 60, borderRadius: '50%'}} alt="peer" />
                                 </div>
                               )}
                               <div style={{position: 'absolute', bottom: 12, left: 12, background: 'rgba(0,0,0,0.6)', padding: '4px 8px', borderRadius: 6, fontSize: 13, fontWeight: 600, zIndex: 2, color: 'white'}}>
