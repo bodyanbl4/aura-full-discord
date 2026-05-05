@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell, ipcMain, Menu, Notification } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, Menu, Notification, desktopCapturer } = require('electron');
 const path = require('node:path');
 const { registerPermissionHandlers } = require('./permissions.cjs');
 const { createTray, destroyTray } = require('./tray.cjs');
@@ -9,6 +9,71 @@ const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost
 
 let mainWindow = null;
 let isQuitting = false;
+
+// Состояние пикера демонстрации экрана: одна "висящая" заявка за раз.
+let pendingDisplayMediaRequest = null;
+
+function setupDisplayMediaHandler(win) {
+  const ses = win.webContents.session;
+
+  ses.setDisplayMediaRequestHandler(async (_request, callback) => {
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['screen', 'window'],
+        thumbnailSize: { width: 320, height: 180 },
+        fetchWindowIcons: false,
+      });
+      if (!sources.length) {
+        callback({});
+        return;
+      }
+      // Если уже есть незакрытая заявка — отменяем её, чтобы не зависнуть.
+      if (pendingDisplayMediaRequest) {
+        try { pendingDisplayMediaRequest.callback({}); } catch (e) {}
+        pendingDisplayMediaRequest = null;
+      }
+      pendingDisplayMediaRequest = {
+        callback,
+        sources,
+        timeout: setTimeout(() => {
+          if (pendingDisplayMediaRequest && pendingDisplayMediaRequest.callback === callback) {
+            pendingDisplayMediaRequest = null;
+            callback({});
+          }
+        }, 120000),
+      };
+      win.webContents.send('aura:show-screen-picker', sources.map(s => ({
+        id: s.id,
+        name: s.name,
+        thumbnail: s.thumbnail.toDataURL(),
+      })));
+    } catch (e) {
+      console.error('display-media handler error:', e);
+      callback({});
+    }
+  }, { useSystemPicker: false });
+}
+
+ipcMain.on('aura:screen-picker-result', (_event, sourceId) => {
+  if (!pendingDisplayMediaRequest) return;
+  const { callback, sources, timeout } = pendingDisplayMediaRequest;
+  pendingDisplayMediaRequest = null;
+  if (timeout) clearTimeout(timeout);
+
+  if (!sourceId) {
+    callback({});
+    return;
+  }
+  const picked = sources.find(s => s.id === sourceId);
+  if (!picked) {
+    callback({});
+    return;
+  }
+  // audio: 'loopback' — захват системного звука Windows. На macOS Electron вернёт null,
+  // что приведёт к падению getDisplayMedia, поэтому включаем только на Windows.
+  const includeLoopback = process.platform === 'win32' && picked.id.startsWith('screen:');
+  callback(includeLoopback ? { video: picked, audio: 'loopback' } : { video: picked });
+});
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
@@ -31,6 +96,7 @@ function createMainWindow() {
   Menu.setApplicationMenu(null);
 
   registerPermissionHandlers(mainWindow.webContents.session);
+  setupDisplayMediaHandler(mainWindow);
 
   if (isDev) {
     mainWindow.loadURL(VITE_DEV_SERVER_URL);

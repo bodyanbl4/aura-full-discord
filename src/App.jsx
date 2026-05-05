@@ -368,9 +368,6 @@ class ErrorBoundary extends React.Component {
 
 const AuraToast = ({ data, onClose, onClick }) => {
   useEffect(() => {
-    try {
-      playTone('unmute');
-    } catch(e) {}
     const timer = setTimeout(onClose, 5000);
     return () => clearTimeout(timer);
   }, [onClose]);
@@ -486,6 +483,7 @@ function MainApp() {
   }, [selectedDevices]);
   const [profileDraft, setProfileDraft] = useState({ name: '', avatar: '' });
   const [profileSaving, setProfileSaving] = useState(false);
+  const [screenPickerSources, setScreenPickerSources] = useState(null); // null = closed, [] = empty, [...] = open with sources
   const [callState, setCallState] = useState({ micMuted: false, screenShare: false });
   const [remoteStreamConnected, setRemoteStreamConnected] = useState(false);
   const [currentPing, setCurrentPing] = useState(0); 
@@ -497,6 +495,7 @@ function MainApp() {
   const [groupCallVideoEnabled, setGroupCallVideoEnabled] = useState(false); 
   const [micDenied, setMicDenied] = useState(false);
   const localGroupStreamRef = useRef(null);
+  const screenShareTracksRef = useRef(null);
   const groupPCsRef = useRef({});
   const groupSignalUnsubsRef = useRef({});
   const groupVideoRefs = useRef({}); 
@@ -843,6 +842,20 @@ function MainApp() {
       return () => navigator.mediaDevices.removeEventListener('devicechange', handler);
     }
   }, []);
+
+  // Слушатель Electron-IPC: открыть пикер выбора окна/экрана для демонстрации.
+  useEffect(() => {
+    if (!window.aura?.onScreenPickerRequest) return;
+    const off = window.aura.onScreenPickerRequest((sources) => {
+      setScreenPickerSources(Array.isArray(sources) ? sources : []);
+    });
+    return off;
+  }, []);
+
+  const resolveScreenPicker = (sourceId) => {
+    setScreenPickerSources(null);
+    if (window.aura?.resolveScreenPicker) window.aura.resolveScreenPicker(sourceId || null);
+  };
 
   // Синхронизируем драфт профиля с актуальным user, когда открывается экран настроек.
   useEffect(() => {
@@ -1496,11 +1509,30 @@ function MainApp() {
           });
         }
         for (const pc of Object.values(groupPCsRef.current)) {
-          const sender = pc.getSenders().find(s => s.track?.kind === 'video');
-          if (sender) {
-            try { await sender.replaceTrack(null); } catch (e) {}
+          const videoSender = pc.getSenders().find(s => s.track?.kind === 'video');
+          if (videoSender) {
+            try { await videoSender.replaceTrack(null); } catch (e) {}
+          }
+          // Возвращаем чистый микрофон в audio-sender (если до этого был микшированный с loopback).
+          const audioSender = pc.getSenders().find(s => s.track?.kind === 'audio');
+          if (audioSender && localGroupStreamRef.current) {
+            const micTrack = localGroupStreamRef.current.getAudioTracks()[0];
+            if (micTrack && audioSender.track !== micTrack) {
+              try { await audioSender.replaceTrack(micTrack); } catch (e) {}
+            }
           }
         }
+        // Чистим loopback-аудио и AudioContext микшера.
+        if (screenShareTracksRef.current?.audio) {
+          try { screenShareTracksRef.current.audio.stop(); } catch (e) {}
+        }
+        if (screenShareTracksRef.current?.mixedAudio) {
+          try { screenShareTracksRef.current.mixedAudio.stop(); } catch (e) {}
+        }
+        if (screenShareTracksRef.current?.mixContext && screenShareTracksRef.current.mixContext.state !== 'closed') {
+          try { screenShareTracksRef.current.mixContext.close(); } catch (e) {}
+        }
+        screenShareTracksRef.current = null;
         setGroupCallVideoEnabled(false);
         playTone('mute');
         const snap = await getDoc(callRef);
@@ -1509,35 +1541,65 @@ function MainApp() {
           await updateDoc(callRef, { participants: parts });
         }
       } else {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        // В Electron audio: true возвращает loopback системного звука для screen-source'ов.
+        // На вебе — только Chrome поддерживает audio при getDisplayMedia, и только для tab-share.
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
         const videoTrack = screenStream.getVideoTracks()[0];
+        const screenAudioTrack = screenStream.getAudioTracks()[0] || null;
         if (!videoTrack) throw new Error('Не удалось получить видео-трек экрана');
 
-        // Гарантируем, что localGroupStreamRef.current существует и содержит этот видео-трек,
+        // Гарантируем, что localGroupStreamRef.current существует и содержит видео-трек,
         // чтобы локальная плитка показывала превью.
         if (!localGroupStreamRef.current) {
           localGroupStreamRef.current = new MediaStream();
         }
-        // Удаляем предыдущие видео-треки, если вдруг остались.
         localGroupStreamRef.current.getVideoTracks().forEach(t => {
           try { t.stop(); } catch (e) {}
           try { localGroupStreamRef.current.removeTrack(t); } catch (e) {}
         });
         localGroupStreamRef.current.addTrack(videoTrack);
+        screenShareTracksRef.current = { video: videoTrack, audio: screenAudioTrack };
 
-        // Шлём трек пирам через предсозданный трансивер (no re-negotiation).
-        for (const pc of Object.values(groupPCsRef.current)) {
-          let sender = pc.getSenders().find(s => s.track?.kind === 'video' || (!s.track && s.transport));
-          // Берём первый sender в video-трансивере (он мог быть без трека).
-          if (!sender) {
-            const transceivers = pc.getTransceivers ? pc.getTransceivers() : [];
-            const vt = transceivers.find(t => t.receiver?.track?.kind === 'video' || t.sender?.track?.kind === 'video');
-            sender = vt?.sender;
+        // Микшируем системный звук + микрофон в один аудио-трек, чтобы пиры услышали обе дорожки
+        // (P2P-трансивер у нас один аудио, и replaceTrack заменит источник целиком).
+        let mixedAudioTrack = null;
+        if (screenAudioTrack && localGroupStreamRef.current.getAudioTracks().length > 0) {
+          try {
+            const AC = window.AudioContext || window.webkitAudioContext;
+            const ctx = new AC();
+            const dest = ctx.createMediaStreamDestination();
+            const micSrc = ctx.createMediaStreamSource(new MediaStream([localGroupStreamRef.current.getAudioTracks()[0]]));
+            const sysSrc = ctx.createMediaStreamSource(new MediaStream([screenAudioTrack]));
+            const micGain = ctx.createGain();
+            const sysGain = ctx.createGain();
+            micGain.gain.value = 1.0;
+            sysGain.gain.value = 0.8;
+            micSrc.connect(micGain).connect(dest);
+            sysSrc.connect(sysGain).connect(dest);
+            mixedAudioTrack = dest.stream.getAudioTracks()[0];
+            screenShareTracksRef.current.mixContext = ctx;
+            screenShareTracksRef.current.mixedAudio = mixedAudioTrack;
+          } catch (e) {
+            console.warn('Audio mix failed, sending only mic:', e);
+            mixedAudioTrack = null;
           }
-          if (sender) {
-            try { await sender.replaceTrack(videoTrack); } catch (e) { console.error('replaceTrack failed:', e); }
-          } else {
-            try { pc.addTrack(videoTrack, localGroupStreamRef.current); } catch (e) {}
+        }
+
+        // Шлём трек(и) пирам через предсозданные трансиверы (no re-negotiation).
+        for (const pc of Object.values(groupPCsRef.current)) {
+          // Видео-sender
+          const transceivers = pc.getTransceivers ? pc.getTransceivers() : [];
+          const vt = transceivers.find(t => t.sender && (t.receiver?.track?.kind === 'video' || t.sender?.track?.kind === 'video' || (!t.sender.track && t.direction !== 'inactive')));
+          const videoSender = vt?.sender || pc.getSenders().find(s => s.track?.kind === 'video');
+          if (videoSender) {
+            try { await videoSender.replaceTrack(videoTrack); } catch (e) { console.error('video replaceTrack failed:', e); }
+          }
+          // Аудио-sender (если есть микшированная дорожка)
+          if (mixedAudioTrack) {
+            const audioSender = pc.getSenders().find(s => s.track?.kind === 'audio');
+            if (audioSender) {
+              try { await audioSender.replaceTrack(mixedAudioTrack); } catch (e) { console.error('audio replaceTrack failed:', e); }
+            }
           }
         }
 
@@ -1550,17 +1612,36 @@ function MainApp() {
           await updateDoc(callRef, { participants: parts });
         }
 
-        videoTrack.onended = async () => {
-          // Пользователь нажал "Stop sharing" в нативном тосте Chrome.
+        const stopShare = async () => {
           if (localGroupStreamRef.current) {
             try { localGroupStreamRef.current.removeTrack(videoTrack); } catch (e) {}
           }
+          // Возвращаем микрофон обратно в аудио-sender, видео-sender обнуляем.
           for (const pc of Object.values(groupPCsRef.current)) {
-            const sender = pc.getSenders().find(s => s.track === videoTrack);
-            if (sender) {
-              try { await sender.replaceTrack(null); } catch (e) {}
+            const videoSender = pc.getSenders().find(s => s.track === videoTrack);
+            if (videoSender) {
+              try { await videoSender.replaceTrack(null); } catch (e) {}
+            }
+            const audioSender = pc.getSenders().find(s => s.track?.kind === 'audio' || (!s.track && s.transport));
+            if (audioSender && localGroupStreamRef.current) {
+              const micTrack = localGroupStreamRef.current.getAudioTracks()[0];
+              if (micTrack) {
+                try { await audioSender.replaceTrack(micTrack); } catch (e) {}
+              }
             }
           }
+          // Чистим трекы и AudioContext
+          try { videoTrack.stop(); } catch (e) {}
+          if (screenShareTracksRef.current?.audio) {
+            try { screenShareTracksRef.current.audio.stop(); } catch (e) {}
+          }
+          if (screenShareTracksRef.current?.mixedAudio) {
+            try { screenShareTracksRef.current.mixedAudio.stop(); } catch (e) {}
+          }
+          if (screenShareTracksRef.current?.mixContext && screenShareTracksRef.current.mixContext.state !== 'closed') {
+            try { screenShareTracksRef.current.mixContext.close(); } catch (e) {}
+          }
+          screenShareTracksRef.current = null;
           setGroupCallVideoEnabled(false);
           const s = await getDoc(callRef);
           if (s.exists()) {
@@ -1568,10 +1649,14 @@ function MainApp() {
             await updateDoc(callRef, { participants: p2 });
           }
         };
+        videoTrack.onended = stopShare;
+        if (screenAudioTrack) screenAudioTrack.onended = stopShare;
       }
     } catch (e) {
       console.error("Screen share error:", e);
-      setToast({ name: 'Демонстрация экрана', text: e?.message || 'Ошибка запуска', avatar: '' });
+      const msg = e?.name === 'NotAllowedError' ? 'Вы отменили выбор окна'
+        : (e?.message || 'Ошибка запуска');
+      setToast({ name: 'Демонстрация экрана', text: msg, avatar: '' });
     }
   };
 
@@ -2542,6 +2627,39 @@ function MainApp() {
           )}
           
           {toast && <AuraToast data={toast} onClose={()=>setToast(null)} onClick={()=>{ setSelectedPeer(allUsers.find(u=>u.username===toast.uid)); setView('chats'); setToast(null); }} />}
+
+          {/* Пикер демонстрации экрана (Electron) */}
+          {screenPickerSources && (
+            <div style={{position:'fixed', inset:0, background:'rgba(0,0,0,0.75)', backdropFilter:'blur(4px)', zIndex:9999, display:'flex', alignItems:'center', justifyContent:'center'}}>
+              <div style={{background:'#2b2d31', borderRadius:12, padding:24, maxWidth:900, width:'90%', maxHeight:'85vh', overflowY:'auto', boxShadow:'0 20px 60px rgba(0,0,0,0.5)'}}>
+                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16}}>
+                  <div style={{fontSize:20, fontWeight:700, color:'white'}}>Выбор окна для демонстрации</div>
+                  <button onClick={()=>resolveScreenPicker(null)} style={{background:'transparent', color:'#b9bbbe', border:'none', cursor:'pointer', fontSize:24}}>×</button>
+                </div>
+                <div style={{fontSize:13, color:'#b9bbbe', marginBottom:16}}>
+                  {screenPickerSources.length === 0 ? 'Источники не найдены. Возможно, требуется разрешение системы.' : 'Системный звук будет захвачен автоматически (только для целого экрана на Windows).'}
+                </div>
+                <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(200px, 1fr))', gap:12}}>
+                  {screenPickerSources.map(src => (
+                    <button
+                      key={src.id}
+                      onClick={()=>resolveScreenPicker(src.id)}
+                      style={{background:'#1e1f22', border:'2px solid transparent', borderRadius:8, padding:8, cursor:'pointer', transition:'border-color 0.15s', textAlign:'left'}}
+                      onMouseEnter={e=>{ e.currentTarget.style.borderColor = '#5865F2'; }}
+                      onMouseLeave={e=>{ e.currentTarget.style.borderColor = 'transparent'; }}
+                    >
+                      <img src={src.thumbnail} alt={src.name} style={{width:'100%', aspectRatio:'16/9', objectFit:'cover', borderRadius:4, background:'#000', marginBottom:8}} />
+                      <div style={{fontSize:13, color:'white', fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}} title={src.name}>{src.name}</div>
+                      <div style={{fontSize:11, color:'#72767d', marginTop:2}}>{src.id.startsWith('screen:') ? 'Экран' : 'Окно'}</div>
+                    </button>
+                  ))}
+                </div>
+                <div style={{display:'flex', justifyContent:'flex-end', marginTop:16}}>
+                  <button onClick={()=>resolveScreenPicker(null)} style={{background:'#4f545c', color:'white', border:'none', padding:'10px 20px', borderRadius:6, cursor:'pointer', fontWeight:600}}>Отмена</button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
   );

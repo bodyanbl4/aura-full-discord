@@ -13,4 +13,12 @@ contextBridge.exposeInMainWorld('aura', {
     ipcRenderer.on('aura:update-event', listener);
     return () => ipcRenderer.removeListener('aura:update-event', listener);
   },
+  // Screen-share picker bridge
+  onScreenPickerRequest: (handler) => {
+    if (typeof handler !== 'function') return () => {};
+    const listener = (_event, sources) => handler(sources);
+    ipcRenderer.on('aura:show-screen-picker', listener);
+    return () => ipcRenderer.removeListener('aura:show-screen-picker', listener);
+  },
+  resolveScreenPicker: (sourceId) => ipcRenderer.send('aura:screen-picker-result', sourceId || null),
 });
