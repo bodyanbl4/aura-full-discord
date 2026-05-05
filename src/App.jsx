@@ -1288,7 +1288,15 @@ function MainApp() {
     groupPCsRef.current[peerId] = pc;
 
     if (localStream) {
-      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+      localStream.getAudioTracks().forEach(track => pc.addTrack(track, localStream));
+    }
+    // Видео-трансивер заранее, чтобы потом включать демонстрацию экрана
+    // через replaceTrack без re-negotiation (наша одношаговая сигналка не умеет повторные offer/answer).
+    try {
+      pc.addTransceiver('video', { direction: 'sendrecv' });
+    } catch (e) {
+      // Старые реализации без addTransceiver — fallback: добавим dummy
+      console.warn('addTransceiver video не поддерживается:', e);
     }
 
     pc.ontrack = (event) => {
@@ -1329,7 +1337,12 @@ function MainApp() {
       // 1. Получаем микрофон
       let localStream;
       try {
-        const audioConstraint = selectedDevices.audioIn ? { deviceId: { exact: selectedDevices.audioIn } } : true;
+        const audioConstraint = {
+          ...(selectedDevices.audioIn ? { deviceId: { exact: selectedDevices.audioIn } } : {}),
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        };
         localStream = await navigator.mediaDevices.getUserMedia({ audio: audioConstraint, video: false });
         setMicDenied(false);
       } catch (e) {
@@ -1475,29 +1488,56 @@ function MainApp() {
       const callRef = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, groupCall.id);
 
       if (groupCallVideoEnabled) {
+        // Останавливаем локальный экран и сообщаем пирам "нет видео" через replaceTrack(null).
         if (localGroupStreamRef.current) {
-          localGroupStreamRef.current.getVideoTracks().forEach(t => t.stop());
+          localGroupStreamRef.current.getVideoTracks().forEach(t => {
+            try { t.stop(); } catch (e) {}
+            try { localGroupStreamRef.current.removeTrack(t); } catch (e) {}
+          });
         }
-        Object.values(groupPCsRef.current).forEach(pc => {
-          pc.getSenders().filter(s => s.track?.kind === 'video').forEach(s => pc.removeTrack(s));
-        });
+        for (const pc of Object.values(groupPCsRef.current)) {
+          const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+          if (sender) {
+            try { await sender.replaceTrack(null); } catch (e) {}
+          }
+        }
         setGroupCallVideoEnabled(false);
         playTone('mute');
         const snap = await getDoc(callRef);
         if (snap.exists()) {
-          const parts = snap.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: false } : p);
+          const parts = (snap.data().participants || []).map(p => p.username === user.username ? { ...p, isStreaming: false } : p);
           await updateDoc(callRef, { participants: parts });
         }
       } else {
         const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
         const videoTrack = screenStream.getVideoTracks()[0];
+        if (!videoTrack) throw new Error('Не удалось получить видео-трек экрана');
 
+        // Гарантируем, что localGroupStreamRef.current существует и содержит этот видео-трек,
+        // чтобы локальная плитка показывала превью.
+        if (!localGroupStreamRef.current) {
+          localGroupStreamRef.current = new MediaStream();
+        }
+        // Удаляем предыдущие видео-треки, если вдруг остались.
+        localGroupStreamRef.current.getVideoTracks().forEach(t => {
+          try { t.stop(); } catch (e) {}
+          try { localGroupStreamRef.current.removeTrack(t); } catch (e) {}
+        });
+        localGroupStreamRef.current.addTrack(videoTrack);
+
+        // Шлём трек пирам через предсозданный трансивер (no re-negotiation).
         for (const pc of Object.values(groupPCsRef.current)) {
-          const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+          let sender = pc.getSenders().find(s => s.track?.kind === 'video' || (!s.track && s.transport));
+          // Берём первый sender в video-трансивере (он мог быть без трека).
+          if (!sender) {
+            const transceivers = pc.getTransceivers ? pc.getTransceivers() : [];
+            const vt = transceivers.find(t => t.receiver?.track?.kind === 'video' || t.sender?.track?.kind === 'video');
+            sender = vt?.sender;
+          }
           if (sender) {
-            await sender.replaceTrack(videoTrack);
+            try { await sender.replaceTrack(videoTrack); } catch (e) { console.error('replaceTrack failed:', e); }
           } else {
-            pc.addTrack(videoTrack, screenStream);
+            try { pc.addTrack(videoTrack, localGroupStreamRef.current); } catch (e) {}
           }
         }
 
@@ -1506,20 +1546,33 @@ function MainApp() {
 
         const snap = await getDoc(callRef);
         if (snap.exists()) {
-          const parts = snap.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: true } : p);
+          const parts = (snap.data().participants || []).map(p => p.username === user.username ? { ...p, isStreaming: true } : p);
           await updateDoc(callRef, { participants: parts });
         }
 
         videoTrack.onended = async () => {
+          // Пользователь нажал "Stop sharing" в нативном тосте Chrome.
+          if (localGroupStreamRef.current) {
+            try { localGroupStreamRef.current.removeTrack(videoTrack); } catch (e) {}
+          }
+          for (const pc of Object.values(groupPCsRef.current)) {
+            const sender = pc.getSenders().find(s => s.track === videoTrack);
+            if (sender) {
+              try { await sender.replaceTrack(null); } catch (e) {}
+            }
+          }
           setGroupCallVideoEnabled(false);
           const s = await getDoc(callRef);
           if (s.exists()) {
-            const p2 = s.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: false } : p);
+            const p2 = (s.data().participants || []).map(p => p.username === user.username ? { ...p, isStreaming: false } : p);
             await updateDoc(callRef, { participants: p2 });
           }
         };
       }
-    } catch (e) { console.error("Screen share error:", e); }
+    } catch (e) {
+      console.error("Screen share error:", e);
+      setToast({ name: 'Демонстрация экрана', text: e?.message || 'Ошибка запуска', avatar: '' });
+    }
   };
 
   const toggleMic = () => {
@@ -2288,10 +2341,17 @@ function MainApp() {
 
                         {/* Локальный пользователь */}
                         <div className={`group-tile ${speakingUsers[getCleanPeerId(groupCall.id, user.username)] ? 'speaking-blue' : ''}`} style={{display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden', borderRadius: 12}}>
-                          <video 
-                            ref={el => { if (el && localGroupStreamRef.current) el.srcObject = localGroupStreamRef.current; }}
-                            autoPlay muted playsInline 
-                            style={{width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0}}
+                          <video
+                            ref={el => {
+                              if (!el) return;
+                              el.muted = true;
+                              el.volume = 0;
+                              if (localGroupStreamRef.current && el.srcObject !== localGroupStreamRef.current) {
+                                el.srcObject = localGroupStreamRef.current;
+                              }
+                            }}
+                            autoPlay muted playsInline
+                            style={{width: '100%', height: '100%', objectFit: 'cover', position: 'absolute', top: 0, left: 0, display: groupCallVideoEnabled ? 'block' : 'none'}}
                           />
                           {!groupCallVideoEnabled && (
                             <div style={{position: 'absolute', inset: 0, background: '#2b2d31', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1}}>
@@ -2321,7 +2381,7 @@ function MainApp() {
                                 <video
                                   ref={el => {
                                     if (!el) return;
-                                    el.srcObject = stream;
+                                    if (el.srcObject !== stream) el.srcObject = stream;
                                     if (typeof el.setSinkId === 'function' && selectedDevices.audioOut) {
                                       el.setSinkId(selectedDevices.audioOut).catch(() => {});
                                     }
