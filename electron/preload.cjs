@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('aura', {
     return () => ipcRenderer.removeListener('aura:update-event', listener);
   },
   installUpdate: () => ipcRenderer.invoke('aura:install-update'),
+  checkForUpdates: () => ipcRenderer.invoke('aura:check-for-updates'),
   // Screen-share picker bridge
   onScreenPickerRequest: (handler) => {
     if (typeof handler !== 'function') return () => {};

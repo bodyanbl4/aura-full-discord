@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { initializeApp, getApps } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, addDoc, updateDoc, deleteDoc, query, where, arrayUnion, arrayRemove, getDocs } from 'firebase/firestore';
@@ -365,6 +366,16 @@ class ErrorBoundary extends React.Component {
     return this.props.children;
   }
 }
+
+const AppVersion = () => {
+  const [v, setV] = useState('');
+  useEffect(() => {
+    if (window.aura?.getVersion) {
+      window.aura.getVersion().then((ver) => setV(ver || '')).catch(() => {});
+    }
+  }, []);
+  return <span>{v || '—'}</span>;
+};
 
 const AuraToast = ({ data, onClose, onClick }) => {
   useEffect(() => {
@@ -858,6 +869,14 @@ function MainApp() {
     setScreenPickerSources(null);
     if (window.aura?.resolveScreenPicker) window.aura.resolveScreenPicker(sourceId || null);
   };
+
+  // Если пользователь вышел из голосового канала с открытым пикером — отменяем заявку,
+  // иначе захват экрана уйдёт в никуда (нет PC, кому отдать трек).
+  useEffect(() => {
+    if (!groupCall && screenPickerSources) {
+      resolveScreenPicker(null);
+    }
+  }, [groupCall, screenPickerSources]);
 
   // Слушатель событий авто-обновления (Discord-style: фоновое скачивание + полоска внизу).
   useEffect(() => {
@@ -1802,6 +1821,7 @@ function MainApp() {
   const pinnedMsg = chatMessages.find(m => m.isPinned);
 
   return (
+    <>
       <div className="aura-viewport" onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
         <style>{getAuraStyles(theme)}</style>
         {isDraggingFile && (<div className="drag-overlay"><Download size={60} color="var(--aura-red)" /><h2 style={{fontSize: 24, fontWeight: 700}}>Отпустите файл для отправки</h2></div>)}
@@ -2374,6 +2394,20 @@ function MainApp() {
                       </button>
                     </div>
 
+                    {window.aura?.isElectron && (
+                      <div style={{background:'var(--bg-card)', padding:25, borderRadius:24, border:'1px solid var(--border)', textAlign:'left'}}>
+                        <label style={{fontSize:12, textTransform:'uppercase', opacity:0.6, fontWeight:800, letterSpacing:1}}>Обновления</label>
+                        <p style={{fontSize:13, opacity:0.7, marginTop:5}}>
+                          Текущая версия: <b><AppVersion /></b>. Обновления скачиваются автоматически в фоне; полоска внизу появится, когда новая версия будет готова к установке.
+                        </p>
+                        <button
+                          onClick={() => { if (window.aura?.checkForUpdates) window.aura.checkForUpdates(); }}
+                          style={{width:'100%', padding:12, marginTop:14, borderRadius:12, background:'rgba(88,101,242,0.1)', color:'#5865F2', fontWeight:700, border:'none', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:8}}>
+                          <RefreshCw size={14}/> Проверить обновления
+                        </button>
+                      </div>
+                    )}
+
                     <div style={{background:'var(--bg-card)', padding:25, borderRadius:24, border:'1px solid var(--border)', textAlign:'left'}}>
                       <label style={{fontSize:12, textTransform:'uppercase', opacity:0.6, fontWeight:800, letterSpacing:1}}>Кэш и Данные</label>
                       <button onClick={clearAllDialogs} style={{width:'100%', padding:16, marginTop:15, borderRadius:16, background:'rgba(218, 55, 60, 0.1)', color:'#da373c', display:'flex', alignItems:'center', justifyContent:'center', gap:10, fontWeight:700, border:'none', cursor:'pointer'}}>
@@ -2657,71 +2691,72 @@ function MainApp() {
           
           {toast && <AuraToast data={toast} onClose={()=>setToast(null)} onClick={()=>{ setSelectedPeer(allUsers.find(u=>u.username===toast.uid)); setView('chats'); setToast(null); }} />}
 
-          {/* Discord-style полоска обновления внизу */}
-          {updateState && !updateBarDismissed && (
-            <div style={{
-              position:'fixed', bottom:0, left:0, right:0, zIndex:9998,
-              background: updateState.stage === 'ready' ? '#3ba55d' : '#5865F2',
-              color:'white', padding:'10px 20px',
-              display:'flex', alignItems:'center', justifyContent:'center', gap:16,
-              fontSize:14, fontWeight:600, boxShadow:'0 -4px 16px rgba(0,0,0,0.3)',
-            }}>
-              {updateState.stage === 'downloading' ? (
-                <>
-                  <RefreshCw size={16} className="animate-spin" />
-                  <span>Загружается обновление{updateState.version ? ` ${updateState.version}` : ''}… {updateState.progress || 0}%</span>
-                </>
-              ) : (
-                <>
-                  <span>✨ Обновление{updateState.version ? ` ${updateState.version}` : ''} готово к установке</span>
-                  <button
-                    onClick={installUpdateNow}
-                    style={{background:'rgba(255,255,255,0.2)', color:'white', border:'1px solid rgba(255,255,255,0.4)', padding:'4px 14px', borderRadius:4, cursor:'pointer', fontWeight:700}}
-                  >Перезапустить сейчас</button>
-                  <button
-                    onClick={()=>setUpdateBarDismissed(true)}
-                    title="Установится при выходе"
-                    style={{background:'transparent', color:'white', border:'none', cursor:'pointer', fontSize:18, marginLeft:4, opacity:0.8}}
-                  >×</button>
-                </>
-              )}
-            </div>
-          )}
-
-          {/* Пикер демонстрации экрана (Electron) */}
-          {screenPickerSources && (
-            <div style={{position:'fixed', inset:0, background:'rgba(0,0,0,0.75)', backdropFilter:'blur(4px)', zIndex:9999, display:'flex', alignItems:'center', justifyContent:'center'}}>
-              <div style={{background:'#2b2d31', borderRadius:12, padding:24, maxWidth:900, width:'90%', maxHeight:'85vh', overflowY:'auto', boxShadow:'0 20px 60px rgba(0,0,0,0.5)'}}>
-                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16}}>
-                  <div style={{fontSize:20, fontWeight:700, color:'white'}}>Выбор окна для демонстрации</div>
-                  <button onClick={()=>resolveScreenPicker(null)} style={{background:'transparent', color:'#b9bbbe', border:'none', cursor:'pointer', fontSize:24}}>×</button>
-                </div>
-                <div style={{fontSize:13, color:'#b9bbbe', marginBottom:16}}>
-                  {screenPickerSources.length === 0 ? 'Источники не найдены. Возможно, требуется разрешение системы.' : 'Системный звук будет захвачен автоматически (только для целого экрана на Windows).'}
-                </div>
-                <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(200px, 1fr))', gap:12}}>
-                  {screenPickerSources.map(src => (
-                    <button
-                      key={src.id}
-                      onClick={()=>resolveScreenPicker(src.id)}
-                      style={{background:'#1e1f22', border:'2px solid transparent', borderRadius:8, padding:8, cursor:'pointer', transition:'border-color 0.15s', textAlign:'left'}}
-                      onMouseEnter={e=>{ e.currentTarget.style.borderColor = '#5865F2'; }}
-                      onMouseLeave={e=>{ e.currentTarget.style.borderColor = 'transparent'; }}
-                    >
-                      <img src={src.thumbnail} alt={src.name} style={{width:'100%', aspectRatio:'16/9', objectFit:'cover', borderRadius:4, background:'#000', marginBottom:8}} />
-                      <div style={{fontSize:13, color:'white', fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}} title={src.name}>{src.name}</div>
-                      <div style={{fontSize:11, color:'#72767d', marginTop:2}}>{src.id.startsWith('screen:') ? 'Экран' : 'Окно'}</div>
-                    </button>
-                  ))}
-                </div>
-                <div style={{display:'flex', justifyContent:'flex-end', marginTop:16}}>
-                  <button onClick={()=>resolveScreenPicker(null)} style={{background:'#4f545c', color:'white', border:'none', padding:'10px 20px', borderRadius:6, cursor:'pointer', fontWeight:600}}>Отмена</button>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       </div>
+      {/* Discord-style полоска обновления внизу — портал в body, чтобы не зависеть от родительских stacking-контекстов */}
+      {updateState && !updateBarDismissed && createPortal((
+        <div style={{
+          position:'fixed', bottom:0, left:0, right:0, zIndex:200001,
+          background: updateState.stage === 'ready' ? '#3ba55d' : '#5865F2',
+          color:'white', padding:'10px 20px',
+          display:'flex', alignItems:'center', justifyContent:'center', gap:16,
+          fontSize:14, fontWeight:600, boxShadow:'0 -4px 16px rgba(0,0,0,0.3)',
+        }}>
+          {updateState.stage === 'downloading' ? (
+            <>
+              <RefreshCw size={16} className="animate-spin" />
+              <span>Загружается обновление{updateState.version ? ` ${updateState.version}` : ''}… {updateState.progress || 0}%</span>
+            </>
+          ) : (
+            <>
+              <span>✨ Обновление{updateState.version ? ` ${updateState.version}` : ''} готово к установке</span>
+              <button
+                onClick={installUpdateNow}
+                style={{background:'rgba(255,255,255,0.2)', color:'white', border:'1px solid rgba(255,255,255,0.4)', padding:'4px 14px', borderRadius:4, cursor:'pointer', fontWeight:700}}
+              >Перезапустить сейчас</button>
+              <button
+                onClick={()=>setUpdateBarDismissed(true)}
+                title="Установится при выходе"
+                style={{background:'transparent', color:'white', border:'none', cursor:'pointer', fontSize:18, marginLeft:4, opacity:0.8}}
+              >×</button>
+            </>
+          )}
+        </div>
+      ), document.body)}
+
+      {/* Пикер демонстрации экрана (Electron) — портал в body, поверх .call-overlay (z-index 150000) */}
+      {screenPickerSources && createPortal((
+        <div style={{position:'fixed', inset:0, background:'rgba(0,0,0,0.75)', backdropFilter:'blur(4px)', zIndex:200000, display:'flex', alignItems:'center', justifyContent:'center'}}>
+          <div style={{background:'#2b2d31', borderRadius:12, padding:24, maxWidth:900, width:'90%', maxHeight:'85vh', overflowY:'auto', boxShadow:'0 20px 60px rgba(0,0,0,0.5)'}}>
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16}}>
+              <div style={{fontSize:20, fontWeight:700, color:'white'}}>Выбор окна для демонстрации</div>
+              <button onClick={()=>resolveScreenPicker(null)} style={{background:'transparent', color:'#b9bbbe', border:'none', cursor:'pointer', fontSize:24}}>×</button>
+            </div>
+            <div style={{fontSize:13, color:'#b9bbbe', marginBottom:16}}>
+              {screenPickerSources.length === 0 ? 'Источники не найдены. Возможно, требуется разрешение системы.' : 'Системный звук будет захвачен автоматически (только для целого экрана на Windows).'}
+            </div>
+            <div style={{display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(200px, 1fr))', gap:12}}>
+              {screenPickerSources.map(src => (
+                <button
+                  key={src.id}
+                  onClick={()=>resolveScreenPicker(src.id)}
+                  style={{background:'#1e1f22', border:'2px solid transparent', borderRadius:8, padding:8, cursor:'pointer', transition:'border-color 0.15s', textAlign:'left'}}
+                  onMouseEnter={e=>{ e.currentTarget.style.borderColor = '#5865F2'; }}
+                  onMouseLeave={e=>{ e.currentTarget.style.borderColor = 'transparent'; }}
+                >
+                  <img src={src.thumbnail} alt={src.name} style={{width:'100%', aspectRatio:'16/9', objectFit:'cover', borderRadius:4, background:'#000', marginBottom:8}} />
+                  <div style={{fontSize:13, color:'white', fontWeight:600, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}} title={src.name}>{src.name}</div>
+                  <div style={{fontSize:11, color:'#72767d', marginTop:2}}>{src.id.startsWith('screen:') ? 'Экран' : 'Окно'}</div>
+                </button>
+              ))}
+            </div>
+            <div style={{display:'flex', justifyContent:'flex-end', marginTop:16}}>
+              <button onClick={()=>resolveScreenPicker(null)} style={{background:'#4f545c', color:'white', border:'none', padding:'10px 20px', borderRadius:6, cursor:'pointer', fontWeight:600}}>Отмена</button>
+            </div>
+          </div>
+        </div>
+      ), document.body)}
+    </>
   );
 }
 

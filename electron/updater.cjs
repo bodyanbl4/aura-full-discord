@@ -60,4 +60,11 @@ function installUpdateNow() {
   }
 }
 
-module.exports = { initAutoUpdater, installUpdateNow };
+function checkForUpdatesManual() {
+  if (!cachedAutoUpdater) return;
+  cachedAutoUpdater.checkForUpdates().catch((err) => {
+    console.warn('[updater] manual check failed:', err && err.message);
+  });
+}
+
+module.exports = { initAutoUpdater, installUpdateNow, checkForUpdatesManual };

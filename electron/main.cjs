@@ -2,7 +2,7 @@ const { app, BrowserWindow, shell, ipcMain, Menu, Notification, desktopCapturer,
 const path = require('node:path');
 const { registerPermissionHandlers } = require('./permissions.cjs');
 const { createTray, destroyTray } = require('./tray.cjs');
-const { initAutoUpdater, installUpdateNow } = require('./updater.cjs');
+const { initAutoUpdater, installUpdateNow, checkForUpdatesManual } = require('./updater.cjs');
 
 // Не валим main-процесс на TypeError-ах из Chromium при отмене getDisplayMedia.
 process.on('uncaughtException', (err) => {
@@ -210,6 +210,14 @@ ipcMain.handle('aura:open-external', (_event, url) => {
 ipcMain.handle('aura:install-update', () => {
   if (typeof installUpdateNow === 'function') {
     installUpdateNow();
+    return true;
+  }
+  return false;
+});
+
+ipcMain.handle('aura:check-for-updates', () => {
+  if (typeof checkForUpdatesManual === 'function') {
+    checkForUpdatesManual();
     return true;
   }
   return false;
