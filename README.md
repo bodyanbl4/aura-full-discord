@@ -1,230 +1,114 @@
-# Aura — Полноценный Discord Clone (оригинальный красный дизайн)
+# Aura — Discord-подобный мессенджер
 
-**Aura** с полностью оригинальным дизайном (красная тема #FF3B30, glassmorphism, все анимации из исходной Aura) + **все функции Discord**.
+React + Vite фронтенд + Firebase (Firestore/Auth/Storage) + WebRTC P2P + Electron-обёртка для desktop-сборки (.exe / .dmg / AppImage).
 
-## Особенности
-- Оригинальный дизайн Aura (красный, стекло, пузырьки, звонок с пульсацией и сворачиванием)
-- Server Bar + Text Channels + Voice Channels
-- Групповые WebRTC звонки (mesh, видео + голос, сетка участников)
-- 1-на-1 звонки, чаты, реакции, редактирование, медиа
-- Members sidebar, drag&drop, запись голоса/видео и т.д.
+## Возможности
 
-## Как запустить (Web)
+- Server Bar + текстовые и голосовые каналы
+- Групповые голосовые каналы через **WebRTC P2P (mesh)** + сигналинг через Firestore
+- 1-на-1 звонки (видео и голос), чаты, реакции, редактирование, медиа
+- Members sidebar, drag&drop, запись голоса/видео
+- Демонстрация экрана через `getDisplayMedia`
+
+## Стек
+
+| Слой | Технология |
+|---|---|
+| UI | React 18 + Vite + lucide-react |
+| Backend / БД | Firebase Firestore + Firebase Auth (anonymous) |
+| Файлы | Firebase Storage / Supabase Storage |
+| Голос/видео | WebRTC P2P (mesh) с STUN/TURN, сигналинг через Firestore |
+| Desktop | Electron 32 + electron-builder + electron-updater |
+
+## Запуск (web, dev)
+
 ```bash
-cd aura-full-discord
 npm install
 npm run dev
 ```
 
-Открой http://localhost:5173
+Откроется `http://localhost:5173`.
 
-## 🖥️ Полноценное Desktop приложение (.exe)
+## Запуск (Electron, dev)
 
-Чтобы сделать **настоящий .exe файл** с поддержкой **системного трея**:
-
-### Вариант 1: Tauri (рекомендуется — лёгкий, как в оригинальной Aura)
 ```bash
-# Установи Tauri CLI (один раз)
-cargo install tauri-cli
-
-# В папке проекта
-npm install @tauri-apps/api
-npx tauri init
-npx tauri build
-```
-
-Готово! `.exe` будет в `src-tauri/target/release/`
-
-**Tauri поддерживает:**
-- Системный трей (minimize to tray)
-- Уведомления
-- Авто-обновления
-- Нативные окна звонков (PiP)
-
-### Вариант 2: Electron (проще, но тяжелее)
-```bash
-npm install electron electron-builder --save-dev
-# Добавь в package.json scripts: "build:exe": "electron-builder"
-npm run build:exe
-```
-
-## Дополнительные функции (уже добавлены)
-- 🖥️ Улучшенная демонстрация экрана (весь монитор + курсор)
-- ⤵ Кнопка "Свернуть в трей" (симуляция + уведомления)
-- Плавающее окно звонка (minimized PiP)
-- 😊 Эмодзи-пикер в чате
-- 👤 Статусы пользователей (online/idle/dnd/offline + кастомный статус)
-- 🔄 Автообновление .exe (готово к Tauri)
-- Все функции Discord + оригинальный красный дизайн Aura
-
-## Предложенные функции (можно добавить):
-- Голосовые каналы с живыми аватарами участников
-- Настройки сервера (изменение названия, иконки)
-- Поиск по сообщениям
-- Пин сообщений в канале
-- Кастомные эмодзи (загрузка своих)
-- Реальные права (только админ может удалять каналы)
-
-## 🎙️ LiveKit Голосовые каналы (минимальная нагрузка на ПК)
-
-**LiveKit** — это SFU (Selective Forwarding Unit), как у Discord. Звонки работают с **минимальной нагрузкой** на ПК даже при 10+ участниках.
-
-### Как настроить LiveKit (5 минут):
-
-**1. Получи бесплатные credentials:**
-- Зайди на https://cloud.livekit.io/
-- Зарегистрируйся (бесплатно, без карты)
-- Создай проект → "Aura Voice"
-- Скопируй **API Key** и **API Secret**
-
-**2. Настрой сервер (2 варианта):**
-
-### Вариант A: Локально (для теста)
-```bash
-cd server
-cp .env.example .env
 npm install
-npm run server
-```
-Сервер запустится на `http://localhost:3001`
-
-### Вариант B: В облаке (рекомендуется — не на твоём ПК) ⭐
-
-**1. Зайди на https://render.com** (бесплатно, регистрация по GitHub)
-
-**2. Нажми "New +" → "Web Service"**
-
-**3. Подключи свой GitHub репозиторий** с проектом
-
-**4. Настрой:**
-- **Name:** `aura-livekit-server`
-- **Root Directory:** `server`
-- **Build Command:** `npm install`
-- **Start Command:** `npm start`
-- **Plan:** Free
-
-**5. Добавь Environment Variables:**
-```
-LIVEKIT_API_KEY=APIpwGekiRj6WSd
-LIVEKIT_API_SECRET=IXB2f9Qw3Ie8u2AA74rR4idWRMjVj2YPeIB3lveiUwID
-LIVEKIT_URL=wss://aura-oau79de6.livekit.cloud
-PORT=10000
+npm run dev:electron
 ```
 
-**6. Нажми "Create Web Service"**
+Скрипт поднимает Vite на `:5173` и Electron, который грузит dev-сервер. Hot reload работает.
 
-**7. Готово!** 
-Render даст тебе URL вида: `https://aura-livekit-server.onrender.com`
+## Сборка production
 
-**8. Обнови App.jsx:**
-Найди строку:
-```js
-const tokenResponse = await fetch('http://localhost:3001/token', {
-```
-Замени на:
-```js
-const tokenResponse = await fetch('https://aura-livekit-server.onrender.com/token', {
-```
+### Web
 
-**Теперь сервер работает 24/7 в облаке, не нагружая твой ПК!** 🚀
-
----
-
-**4. Готово!**
-Теперь голосовые каналы работают через LiveKit с минимальной нагрузкой! 🚀
-
----
-
-## 100% Автообновление .exe (GitHub Releases)
-
-### Как настроить автообновление (5 минут):
-
-**1. Создай GitHub репозиторий**
-- Зайди на github.com → New repository → `aura-discord`
-- Сделай его **Public**
-
-**2. Настрой Tauri (уже готово в проекте)**
 ```bash
-cd aura-full-discord
-npm install @tauri-apps/api
-npx tauri init
+npm run build
+# результат в dist/
+npm run preview   # локальная проверка собранного билда
 ```
 
-**3. Получи публичный ключ (для подписи обновлений)**
+### Desktop
+
 ```bash
-npx tauri signer generate -w ~/.tauri/myapp.key
-```
-Скопируй **публичный ключ** и вставь в `src-tauri/tauri.conf.json` в поле `pubkey`
+# .exe / .dmg / AppImage в зависимости от ОС
+npm run dist
 
-**4. Настрой GitHub Actions (автоматическая сборка)**
-Создай файл `.github/workflows/release.yml`:
+# Только Windows
+npm run dist:win
 
-```yaml
-name: Release
-on:
-  push:
-    tags:
-      - 'v*'
-jobs:
-  release:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Build Tauri
-        run: |
-          npm install
-          npx tauri build
-      - name: Upload Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/nsis/*.exe
+# Без installer — для быстрой проверки
+npm run pack
 ```
 
-**5. Выпусти первую версию**
-```bash
-git tag v2.9.0
-git push origin v2.9.0
+Артефакты появятся в `release/`.
+
+> На Windows без подписи (code signing) SmartScreen покажет «Неизвестный издатель». Это ожидаемо. Чтобы убрать — нужен Code Signing-сертификат, см. [docs.electron-builder](https://www.electron.build/code-signing).
+
+## Структура проекта
+
+```
+.
+├── electron/             # код desktop-обёртки
+│   ├── main.js           # главный процесс: окно, IPC, lifecycle
+│   ├── preload.js        # contextBridge, безопасный мост в renderer
+│   ├── permissions.js    # разрешения для микрофона / экрана / уведомлений
+│   ├── tray.js           # системный трей
+│   └── updater.js        # auto-update через electron-updater
+├── src/                  # React-приложение
+│   ├── App.jsx
+│   ├── main.jsx
+│   └── index.css
+├── build/                # ресурсы для electron-builder (icon.ico, icon.icns, icon.png)
+├── index.html
+├── package.json
+└── vite.config.js
 ```
 
-**6. Готово!**
-- При запуске `.exe` будет автоматически проверять обновления на GitHub
-- При выходе новой версии пользователи увидят уведомление и смогут обновиться одним кликом
+Иконки для desktop-сборки положи в `build/`:
 
-### Как проверить прямо сейчас (веб-версия):
-1. Запусти `npm run dev`
-2. Нажми **"🔄 Проверить обновления"** (внизу справа)
-3. Должно показать "Доступно обновление" или "У вас последняя версия"
+- `build/icon.ico` (Windows, 256×256)
+- `build/icon.icns` (macOS)
+- `build/icon.png` (Linux, 512×512)
 
-Готово! Теперь у тебя настоящее автообновление как у Discord 🔥
+Если этих файлов нет, electron-builder соберёт пакет без иконки приложения и трея.
 
-### 1. В веб-версии (уже работает):
-- Нажми кнопку **"🔄 Проверить обновления"** внизу справа
-- С вероятностью 30% покажет "Доступно обновление"
-- Нажми "Установить обновление" — симуляция загрузки
+## Auto-update
 
-### 2. В реальном .exe (Tauri):
-```bash
-# После сборки Tauri
-npx tauri build
+Используется `electron-updater` с провайдером **GitHub Releases**. Подробнее: [electron.build/auto-update](https://www.electron.build/auto-update).
 
-# В коде уже есть готовый updater:
-# import { checkUpdate, installUpdate } from '@tauri-apps/api/updater'
-# 
-# async function checkForUpdates() {
-#   const update = await checkUpdate()
-#   if (update.shouldUpdate) {
-#     await installUpdate()
-#   }
-# }
-```
+Чтобы релиз был доступен:
 
-**Как протестировать реальное автообновление:**
-1. Собери `.exe` через `npx tauri build`
-2. Загрузи `.exe` на GitHub Releases (v2.8)
-3. Измени версию в `tauri.conf.json` на v2.9
-4. Собери новую версию
-5. Запусти старую `.exe` — она сама предложит обновиться!
+1. Создай git-тег вида `v1.2.3`.
+2. CI (или локально) собирает артефакты `npm run dist` и публикует их в GitHub Releases — electron-builder может это сделать сам, если задана переменная окружения `GH_TOKEN`.
+3. Установленные клиенты получат уведомление об обновлении и скачают его в фоне.
 
-Готово! Наслаждайся Aura с мощью Discord 🔥
+## Конфигурация Firebase
+
+Firebase-настройки сейчас зашиты в `src/App.jsx`. Для production-проекта вынеси их в Vite env-переменные (`import.meta.env.VITE_FIREBASE_*`) и подключи через `.env` (см. `.env.example`).
+
+## Безопасность (важно)
+
+- **Пароли пользователей сейчас хранятся в Firestore в открытом виде.** Это разработческая заглушка — в production-проекте замени на Firebase Auth (Email/Password или OAuth), удали поле `password` из `aura_users_v3` и добавь Firestore Security Rules. См. [TODO в issues].
+- Если ты настраивал Tauri auto-update (раньше в проекте была папка `~/.tauri/`), считай, что приватный ключ подписания скомпрометирован: сгенерируй новый ключ, если планируешь использовать Tauri отдельно.
+- Если в репозиторий когда-либо попадал `LIVEKIT_API_SECRET` или Supabase-токен — ротируй их в облачной консоли. Они остаются в истории git даже после удаления.

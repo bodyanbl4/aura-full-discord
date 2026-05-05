@@ -1,11 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp, getApps } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, addDoc, updateDoc, deleteDoc, query, where, arrayUnion, getDocs } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
-
-// ИМПОРТЫ LIVEKIT
-import { Room, RoomEvent, createLocalTracks } from 'livekit-client';
 
 import {
   AlertTriangle, Zap, Search, Globe, MessageCircle, Phone, PhoneIncoming,
@@ -454,7 +451,10 @@ function MainApp() {
   const [groupRemoteStreams, setGroupRemoteStreams] = useState({}); 
   const [groupCallMuted, setGroupCallMuted] = useState(false);
   const [groupCallVideoEnabled, setGroupCallVideoEnabled] = useState(false); 
+  const [micDenied, setMicDenied] = useState(false);
   const localGroupStreamRef = useRef(null);
+  const groupPCsRef = useRef({});
+  const groupSignalUnsubsRef = useRef({});
   const groupVideoRefs = useRef({}); 
   const [speakingUsers, setSpeakingUsers] = useState({}); 
   
@@ -492,16 +492,7 @@ function MainApp() {
     
     const initAuth = async () => {
       try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          try {
-            await signInWithCustomToken(auth, __initial_auth_token);
-          } catch (tokenErr) {
-            console.warn("Auth with custom token failed, falling back to anonymous auth:", tokenErr);
-            if (!auth.currentUser) {
-              await signInAnonymously(auth);
-            }
-          }
-        } else if (!auth.currentUser) {
+        if (!auth.currentUser) {
           await signInAnonymously(auth);
         }
       } catch (e) {
@@ -1188,84 +1179,64 @@ function MainApp() {
     setCallSession(null); setRemoteStreamConnected(false); setCallDuration(0); setIsCallMinimized(false);
   };
 
+  // WebRTC P2P mesh для голосового канала
+  const createPeerConnectionForGroup = (peerId, localStream, callId) => {
+    const pc = new RTCPeerConnection(RTC_SERVERS);
+    groupPCsRef.current[peerId] = pc;
+
+    if (localStream) {
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+    }
+
+    pc.ontrack = (event) => {
+      const remoteStream = event.streams[0];
+      if (remoteStream) {
+        setGroupRemoteStreams(prev => ({ ...prev, [peerId]: remoteStream }));
+      }
+    };
+
+    const sigDoc = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, callId, 'signals', `${user.username}__${peerId}`);
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        const current = groupPCsRef.current[peerId]?._iceBuf || [];
+        current.push(event.candidate.toJSON());
+        if (groupPCsRef.current[peerId]) groupPCsRef.current[peerId]._iceBuf = current;
+        setDoc(sigDoc, { ice: current }, { merge: true }).catch(() => {});
+      }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === 'failed') {
+        try { pc.restartIce(); } catch (e) {}
+      }
+    };
+
+    return pc;
+  };
+
   const startGroupCall = async (roomName = 'General Voice') => {
     if (!user) return;
     if (groupCall && groupCall.name === roomName) return;
     if (groupCall) await leaveGroupCall(true);
+
     const callId = `group-${roomName.toLowerCase().replace(/\s+/g, '-')}`;
-    
-    setToast({ name: "Система", text: "Подключение к серверу LiveKit...", avatar: "" });
+    setToast({ name: "Система", text: "Подключение к голосовому каналу...", avatar: "" });
 
     try {
-      // 1. ПОЛУЧАЕМ ТОКЕН ОТ VERCEL С ИСПОЛЬЗОВАНИЕМ ССЫЛКИ ИЗ СКРИНШОТА
-      const tokenResponse = await fetch('https://aura-full-discord-758l-6nrr26gn6-bodyanbl4s-projects.vercel.app/api/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          room: callId,
-          identity: user.username
-        })
-      });
-
-      if (!tokenResponse.ok) {
-        throw new Error(`Ошибка Vercel API: ${tokenResponse.status}`);
-      }
-
-      const data = await tokenResponse.json();
-      const token = data.token || data;
-
-      if (!token) throw new Error("Токен не получен");
-
-      // 2. ПОДКЛЮЧЕНИЕ К LIVEKIT
-      const room = new Room();
-      window.livekitRoom = room;
-
-      await room.connect('wss://aura-oau79de6.livekit.cloud', token);
-
-      let tracks;
+      // 1. Получаем микрофон
+      let localStream;
       try {
-        tracks = await createLocalTracks({ audio: true, video: false });
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        setMicDenied(false);
       } catch (e) {
-        if (window.confirm("Не удалось получить доступ к микрофону. Хотите войти в режиме зрителя?")) {
-           tracks = []; // Слушаем без публикации своего звука
-        } else {
-           room.disconnect();
-           return;
-        }
+        localStream = null; // режим слушателя
+        setMicDenied(true);
       }
-
-      if (tracks.length > 0) {
-         await room.localParticipant.publishTracks(tracks);
-         const localStream = new MediaStream();
-         tracks.forEach(t => localStream.addTrack(t.mediaStreamTrack));
-         localGroupStreamRef.current = localStream;
-      } else {
-         localGroupStreamRef.current = null;
-      }
-
+      localGroupStreamRef.current = localStream;
       setGroupCallMuted(false);
       setGroupCallVideoEnabled(false);
 
-      // 3. ОБРАБОТКА ВХОДЯЩИХ ПОТОКОВ
-      room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
-        if (track.kind === 'audio' || track.kind === 'video') {
-          const remoteStream = new MediaStream([track.mediaStreamTrack]);
-          setGroupRemoteStreams(prev => ({
-            ...prev,
-            [participant.identity]: remoteStream
-          }));
-        }
-      });
-
-      room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
-        setGroupRemoteStreams(prev => {
-          const newStreams = { ...prev };
-          delete newStreams[participant.identity];
-          return newStreams;
-        });
-      });
-
-      // ОБНОВЛЯЕМ БАЗУ (ЧТОБЫ ДРУГИЕ ВИДЕЛИ В САЙДБАРЕ)
+      // 2. Записываем себя в Firestore
       const callRef = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, callId);
       const snap = await getDoc(callRef);
       let currentParticipants = [];
@@ -1274,15 +1245,80 @@ function MainApp() {
       }
       if (!currentParticipants.find(p => p.username === user.username)) {
         currentParticipants.push({ username: user.username, name: user.name || user.username, avatar: user.avatar, isStreaming: false });
-        await setDoc(callRef, { id: callId, type: 'group', name: roomName, participants: currentParticipants, status: 'active', ts: Date.now(), createdBy: user.username }, { merge: true });
       }
+      await setDoc(callRef, { id: callId, type: 'group', name: roomName, participants: currentParticipants, status: 'active', ts: Date.now(), createdBy: user.username }, { merge: true });
+
+      // 3. Инициируем P2P со всеми, кто уже в канале
+      const existingPeers = currentParticipants.filter(p => p.username !== user.username);
+      for (const peer of existingPeers) {
+        const peerId = peer.username;
+        const pc = createPeerConnectionForGroup(peerId, localStream, callId);
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        const offerDoc = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, callId, 'signals', `${user.username}__${peerId}`);
+        await setDoc(offerDoc, { offer: { type: offer.type, sdp: offer.sdp }, ice: [] });
+
+        const answerDoc = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, callId, 'signals', `${peerId}__${user.username}`);
+        const unsub = onSnapshot(answerDoc, async (s) => {
+          if (!s.exists()) return;
+          const data = s.data();
+          if (data.answer && !pc.currentRemoteDescription) {
+            await pc.setRemoteDescription(new RTCSessionDescription(data.answer)).catch(() => {});
+          }
+          if (data.ice && Array.isArray(data.ice)) {
+            for (const candidate of data.ice) {
+              await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => {});
+            }
+          }
+        });
+        groupSignalUnsubsRef.current[peerId] = unsub;
+      }
+
+      // 4. Слушаем новых участников (приходящих после нас)
+      const channelUnsub = onSnapshot(callRef, async (s) => {
+        if (!s.exists() || s.data().status !== 'active') return;
+        const parts = s.data().participants || [];
+        for (const peer of parts) {
+          if (peer.username === user.username) continue;
+          if (groupPCsRef.current[peer.username]) continue;
+
+          const offerDoc = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, callId, 'signals', `${peer.username}__${user.username}`);
+          const unsub = onSnapshot(offerDoc, async (offerSnap) => {
+            if (!offerSnap.exists()) return;
+            const data = offerSnap.data();
+            if (!data.offer) return;
+            if (groupPCsRef.current[peer.username]) return;
+
+            const pc = createPeerConnectionForGroup(peer.username, localGroupStreamRef.current, callId);
+            await pc.setRemoteDescription(new RTCSessionDescription(data.offer)).catch(() => {});
+
+            if (data.ice && Array.isArray(data.ice)) {
+              for (const c of data.ice) {
+                await pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
+              }
+            }
+
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            const ansDoc = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, callId, 'signals', `${user.username}__${peer.username}`);
+            await setDoc(ansDoc, { answer: { type: answer.type, sdp: answer.sdp }, ice: [] });
+
+            groupSignalUnsubsRef.current[peer.username] = () => {};
+          });
+          groupSignalUnsubsRef.current[`_offer_${peer.username}`] = unsub;
+        }
+      });
+      groupSignalUnsubsRef.current['_channel'] = channelUnsub;
 
       setGroupCall({ id: callId, name: roomName, participants: currentParticipants, status: 'active' });
       setIsCallMinimized(false);
       playTone('unmute');
 
     } catch (e) {
-      console.error("LiveKit connection error:", e);
+      console.error("WebRTC group call error:", e);
       setToast({ name: "Ошибка подключения", text: `${e.message}`, avatar: "" });
     }
   };
@@ -1290,19 +1326,21 @@ function MainApp() {
   const leaveGroupCall = async (updateDb = true) => {
     if (!groupCall) return;
     playTone('leave');
-    
-    if (window.livekitRoom) {
-      window.livekitRoom.disconnect();
-      window.livekitRoom = null;
-    }
+
+    Object.values(groupPCsRef.current).forEach(pc => { try { pc.close(); } catch (e) {} });
+    groupPCsRef.current = {};
+
+    Object.values(groupSignalUnsubsRef.current).forEach(unsub => { try { unsub(); } catch (e) {} });
+    groupSignalUnsubsRef.current = {};
 
     if (localGroupStreamRef.current) {
       localGroupStreamRef.current.getTracks().forEach(t => t.stop());
       localGroupStreamRef.current = null;
     }
-    
+
     setGroupRemoteStreams({});
-    
+    setMicDenied(false);
+
     if (updateDb && groupCall.id) {
       const callRef = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, groupCall.id);
       try {
@@ -1319,57 +1357,65 @@ function MainApp() {
   };
 
   const toggleGroupMic = () => {
-    if (window.livekitRoom && localGroupStreamRef.current) {
-      const isMuted = !groupCallMuted;
-      window.livekitRoom.localParticipant.setMicrophoneEnabled(!isMuted);
-      setGroupCallMuted(isMuted);
-      playTone(isMuted ? 'mute' : 'unmute');
+    const isMuted = !groupCallMuted;
+    if (localGroupStreamRef.current) {
+      localGroupStreamRef.current.getAudioTracks().forEach(t => { t.enabled = !isMuted; });
     }
+    setGroupCallMuted(isMuted);
+    playTone(isMuted ? 'mute' : 'unmute');
   };
 
   const toggleGroupScreenShare = async () => {
     try {
-      if (!groupCall || !window.livekitRoom) return;
+      if (!groupCall) return;
       const callRef = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, groupCall.id);
 
-      if (groupCallVideoEnabled) { 
-        await window.livekitRoom.localParticipant.setScreenShareEnabled(false);
+      if (groupCallVideoEnabled) {
+        if (localGroupStreamRef.current) {
+          localGroupStreamRef.current.getVideoTracks().forEach(t => t.stop());
+        }
+        Object.values(groupPCsRef.current).forEach(pc => {
+          pc.getSenders().filter(s => s.track?.kind === 'video').forEach(s => pc.removeTrack(s));
+        });
         setGroupCallVideoEnabled(false);
         playTone('mute');
-
         const snap = await getDoc(callRef);
         if (snap.exists()) {
-           const parts = snap.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: false } : p);
-           await updateDoc(callRef, { participants: parts });
+          const parts = snap.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: false } : p);
+          await updateDoc(callRef, { participants: parts });
         }
       } else {
-        await window.livekitRoom.localParticipant.setScreenShareEnabled(true);
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        const videoTrack = screenStream.getVideoTracks()[0];
+
+        for (const pc of Object.values(groupPCsRef.current)) {
+          const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+          if (sender) {
+            await sender.replaceTrack(videoTrack);
+          } else {
+            pc.addTrack(videoTrack, screenStream);
+          }
+        }
+
         setGroupCallVideoEnabled(true);
         playTone('unmute');
 
         const snap = await getDoc(callRef);
         if (snap.exists()) {
-           const parts = snap.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: true } : p);
-           await updateDoc(callRef, { participants: parts });
+          const parts = snap.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: true } : p);
+          await updateDoc(callRef, { participants: parts });
         }
-        
-        // Когда пользователь сам завершает стрим через браузер
-        const screenTracks = window.livekitRoom.localParticipant.videoTrackPublications;
-        for (const [, pub] of screenTracks) {
-          if (pub.track && pub.source === 'screen_share') {
-            pub.track.mediaStreamTrack.onended = async () => {
-               await window.livekitRoom.localParticipant.setScreenShareEnabled(false);
-               setGroupCallVideoEnabled(false);
-               const s = await getDoc(callRef);
-               if (s.exists()) {
-                  const p2 = s.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: false } : p);
-                  await updateDoc(callRef, { participants: p2 });
-               }
-            };
+
+        videoTrack.onended = async () => {
+          setGroupCallVideoEnabled(false);
+          const s = await getDoc(callRef);
+          if (s.exists()) {
+            const p2 = s.data().participants.map(p => p.username === user.username ? { ...p, isStreaming: false } : p);
+            await updateDoc(callRef, { participants: p2 });
           }
-        }
+        };
       }
-    } catch(e){}
+    } catch (e) { console.error("Screen share error:", e); }
   };
 
   const toggleMic = () => {
