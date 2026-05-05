@@ -93,45 +93,65 @@ npm run pack
 
 Если этих файлов нет, electron-builder соберёт пакет без иконки приложения и трея.
 
-## Auto-update (Discord-style, через Firebase Hosting)
+## Auto-update (Discord-style, через Firebase Storage)
 
-`electron-updater` настроен на `provider: generic` с фидом `https://aura-748c8.web.app/`.
-GitHub Releases / GH_TOKEN не нужны: апдейты раздаёт Firebase Hosting того же
-проекта, что и Firestore (`aura-748c8`).
+`electron-updater` настроен на `provider: generic` с фидом
+`https://storage.googleapis.com/aura-748c8.firebasestorage.app/updates/`.
+GitHub Releases / GH_TOKEN не нужны: апдейты раздаёт Firebase Storage того же
+проекта, что и Firestore (`aura-748c8`). Бесплатный план Spark поддерживает
+.exe (в отличие от Hosting).
 
-### Один раз настроить (на машине разработчика)
+### Один раз настроить
 
-1. `npm i -g firebase-tools`
-2. `firebase login` (один раз, аккаунт-владелец проекта)
-3. Убедись, что в Firebase Console включён Hosting для `aura-748c8`. Сайт по умолчанию — `aura-748c8.web.app`.
+1. **Получить service account JSON.**
+   - Открой https://console.firebase.google.com/project/aura-748c8/settings/serviceaccounts/adminsdk
+   - Generate new private key → скачается JSON.
+   - Положи его как `serviceAccount.json` в **корень репозитория**
+     (`.gitignore` уже его игнорирует, в коммит не уйдёт).
+   - Альтернатива: переменная окружения `FIREBASE_SERVICE_ACCOUNT` с абсолютным путём.
+
+2. **Установить deps** (если ещё не сделано):
+   ```bash
+   npm install
+   ```
+   Это установит `firebase-admin` для скрипта upload.
+
+3. **Сделать бакет публично читаемым** (один раз).
+   Скрипт `scripts/upload-storage.cjs` пытается выставить IAM-биндинг автоматически
+   при первом запуске. Если у service account нет прав `Storage Admin` — сделай
+   вручную:
+   - Cloud Console → Storage → bucket `aura-748c8.firebasestorage.app` → Permissions →
+     ADD principal → `allUsers`, role `Storage Object Viewer`.
+   - Либо: `gsutil iam ch allUsers:objectViewer gs://aura-748c8.firebasestorage.app`.
 
 ### Релиз новой версии
 
 ```bash
-# 1. Бампни версию
 npm version patch        # 0.0.1 -> 0.0.2
-
-# 2. Собери .exe и задеплой апдейт-фид в Firebase Hosting
 npm run release:win
 ```
 
 Что делает `release:win`:
 
-1. `npm run dist:win` → `electron-builder` собирает `release/Aura Discord Setup X.Y.Z.exe`,
-   `release/latest.yml`, `release/*.blockmap`.
-2. `npm run prepare-release` → `scripts/prepare-release.cjs` копирует артефакты в `release-public/`.
-3. `firebase deploy --only hosting` → Firebase публикует `release-public/` на `aura-748c8.web.app`.
+1. `electron-builder --win` соберёт `release/Aura Discord Setup X.Y.Z.exe`
+   + `release/latest.yml` + `release/*.blockmap`.
+2. `node scripts/upload-storage.cjs` через Firebase Admin SDK заливает их
+   в `gs://aura-748c8.firebasestorage.app/updates/`.
+3. После заливки они доступны по
+   `https://storage.googleapis.com/aura-748c8.firebasestorage.app/updates/<file>`
+   без авторизации.
 
 После этого все установленные клиенты при следующем старте (или раз в 30 минут)
-проверят `https://aura-748c8.web.app/latest.yml`, обнаружат новую версию,
-скачают `.exe` в фоне и тихо установят при выходе из приложения.
+проверят `…/updates/latest.yml`, обнаружат новую версию, скачают `.exe`
+в фоне и тихо установят при выходе из приложения. **Никаких** GitHub-токенов,
+ручной публикации и `firebase deploy`.
 
 ### Поведение клиента
-- Скачивание идёт **в фоне**, без модалок.
-- В правом нижнем углу показывается тонкая полоска прогресса.
+- Скачивание идёт в фоне, без модалок.
+- В правом нижнем углу — тонкая полоска прогресса.
 - Когда скачано — кнопка «Перезапустить сейчас» (silent install + force run).
-- Если пользователь крестиком закрыл полоску — апдейт всё равно установится
-  при выходе из приложения (`autoInstallOnAppQuit`).
+- Если крестиком закрыл полоску — апдейт всё равно установится при выходе
+  из приложения (`autoInstallOnAppQuit`).
 
 ## Конфигурация Firebase
 

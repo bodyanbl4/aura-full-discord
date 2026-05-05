@@ -7,6 +7,11 @@ release/
 release-public/
 build/Release
 
+# Service account credentials for Firebase Storage uploads — must NEVER be committed
+serviceAccount.json
+service-account.json
+firebase-adminsdk-*.json
+
 # Logs
 logs
 *.log
