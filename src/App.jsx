@@ -1402,11 +1402,35 @@ function MainApp() {
       console.warn('addTransceiver video не поддерживается:', e);
     }
 
+    // Собираем поток вручную через event.track. event.streams[0] не приходит,
+    // когда m-line объявлена через addTransceiver без явно прикреплённого трека
+    // (наш случай для видео-демонстрации, чтобы избежать re-negotiation).
+    // Без этого видео пира не появляется, потому что receiver-трек не попадал в state.
     pc.ontrack = (event) => {
-      const remoteStream = event.streams[0];
-      if (remoteStream) {
-        setGroupRemoteStreams(prev => ({ ...prev, [peerId]: remoteStream }));
-      }
+      setGroupRemoteStreams(prev => {
+        const old = prev[peerId];
+        const next = new MediaStream();
+        if (old) {
+          for (const t of old.getTracks()) {
+            if (t.kind !== event.track.kind) next.addTrack(t);
+          }
+        }
+        next.addTrack(event.track);
+        return { ...prev, [peerId]: next };
+      });
+      // Когда удалённый трек завершается (пир остановил демонстрацию), пересобираем стрим без него,
+      // чтобы плитка вернулась в режим аватара. Без этого remote-плитка показывает чёрный квадрат.
+      event.track.onended = () => {
+        setGroupRemoteStreams(prev => {
+          const old = prev[peerId];
+          if (!old) return prev;
+          const next = new MediaStream();
+          for (const t of old.getTracks()) {
+            if (t !== event.track && t.readyState !== 'ended') next.addTrack(t);
+          }
+          return { ...prev, [peerId]: next };
+        });
+      };
     };
 
     const sigDoc = doc(db, 'artifacts', appId, 'public', 'data', CALLS_COL, callId, 'signals', `${user.username}__${peerId}`);
@@ -2618,7 +2642,7 @@ function MainApp() {
                           
                           return (
                             <div key={peer.username} onClick={() => setExpandedTileUser(peer.username)} title="Раскрыть на весь экран" className={`group-tile ${isSpeaking ? 'speaking-blue' : ''}`} style={{display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', overflow: 'hidden', borderRadius: 12, cursor: 'pointer'}}>
-                              {stream ? (
+                              {stream && peer.isStreaming ? (
                                 <video
                                   ref={el => {
                                     if (!el) return;
@@ -2657,7 +2681,9 @@ function MainApp() {
                         const peerObj = isLocal ? user : groupCall.participants?.find(p => p.username === expandedTileUser);
                         const peerId = isLocal ? null : getCleanPeerId(groupCall.id, expandedTileUser);
                         const stream = isLocal ? localGroupStreamRef.current : groupRemoteStreams[peerId];
-                        const hasVideo = isLocal ? groupCallVideoEnabled : !!stream?.getVideoTracks?.().length;
+                        const hasVideo = isLocal
+                          ? groupCallVideoEnabled
+                          : (!!peerObj?.isStreaming && !!stream?.getVideoTracks?.().length);
                         return (
                           <div onClick={() => setExpandedTileUser(null)} style={{position:'absolute', inset:0, background:'#000', zIndex:40, display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer'}}>
                             {stream && hasVideo ? (

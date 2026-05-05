@@ -93,15 +93,45 @@ npm run pack
 
 Если этих файлов нет, electron-builder соберёт пакет без иконки приложения и трея.
 
-## Auto-update
+## Auto-update (Discord-style, через Firebase Hosting)
 
-Используется `electron-updater` с провайдером **GitHub Releases**. Подробнее: [electron.build/auto-update](https://www.electron.build/auto-update).
+`electron-updater` настроен на `provider: generic` с фидом `https://aura-748c8.web.app/`.
+GitHub Releases / GH_TOKEN не нужны: апдейты раздаёт Firebase Hosting того же
+проекта, что и Firestore (`aura-748c8`).
 
-Чтобы релиз был доступен:
+### Один раз настроить (на машине разработчика)
 
-1. Создай git-тег вида `v1.2.3`.
-2. CI (или локально) собирает артефакты `npm run dist` и публикует их в GitHub Releases — electron-builder может это сделать сам, если задана переменная окружения `GH_TOKEN`.
-3. Установленные клиенты получат уведомление об обновлении и скачают его в фоне.
+1. `npm i -g firebase-tools`
+2. `firebase login` (один раз, аккаунт-владелец проекта)
+3. Убедись, что в Firebase Console включён Hosting для `aura-748c8`. Сайт по умолчанию — `aura-748c8.web.app`.
+
+### Релиз новой версии
+
+```bash
+# 1. Бампни версию
+npm version patch        # 0.0.1 -> 0.0.2
+
+# 2. Собери .exe и задеплой апдейт-фид в Firebase Hosting
+npm run release:win
+```
+
+Что делает `release:win`:
+
+1. `npm run dist:win` → `electron-builder` собирает `release/Aura Discord Setup X.Y.Z.exe`,
+   `release/latest.yml`, `release/*.blockmap`.
+2. `npm run prepare-release` → `scripts/prepare-release.cjs` копирует артефакты в `release-public/`.
+3. `firebase deploy --only hosting` → Firebase публикует `release-public/` на `aura-748c8.web.app`.
+
+После этого все установленные клиенты при следующем старте (или раз в 30 минут)
+проверят `https://aura-748c8.web.app/latest.yml`, обнаружат новую версию,
+скачают `.exe` в фоне и тихо установят при выходе из приложения.
+
+### Поведение клиента
+- Скачивание идёт **в фоне**, без модалок.
+- В правом нижнем углу показывается тонкая полоска прогресса.
+- Когда скачано — кнопка «Перезапустить сейчас» (silent install + force run).
+- Если пользователь крестиком закрыл полоску — апдейт всё равно установится
+  при выходе из приложения (`autoInstallOnAppQuit`).
 
 ## Конфигурация Firebase
 

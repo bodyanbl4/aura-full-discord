@@ -1,0 +1,25 @@
+{
+  "hosting": {
+    "public": "release-public",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "headers": [
+      {
+        "source": "**/*.@(yml|yaml)",
+        "headers": [
+          { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" },
+          { "key": "Content-Type", "value": "text/yaml; charset=utf-8" }
+        ]
+      },
+      {
+        "source": "**/*.@(exe|blockmap)",
+        "headers": [
+          { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }
+        ]
+      }
+    ]
+  }
+}
