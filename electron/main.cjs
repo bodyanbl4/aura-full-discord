@@ -1,8 +1,8 @@
 const { app, BrowserWindow, shell, ipcMain, Menu, Notification } = require('electron');
 const path = require('node:path');
-const { registerPermissionHandlers } = require('./permissions');
-const { createTray, destroyTray } = require('./tray');
-const { initAutoUpdater } = require('./updater');
+const { registerPermissionHandlers } = require('./permissions.cjs');
+const { createTray, destroyTray } = require('./tray.cjs');
+const { initAutoUpdater } = require('./updater.cjs');
 
 const isDev = !app.isPackaged;
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
@@ -20,7 +20,7 @@ function createMainWindow() {
     backgroundColor: '#0A0A0C',
     autoHideMenuBar: true,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
