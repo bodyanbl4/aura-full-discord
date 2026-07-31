@@ -1,6 +1,0 @@
-{
-  "type": "module",
-  "dependencies": {
-    "livekit-server-sdk": "^1.2.7"
-  }
-}

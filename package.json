@@ -1,27 +1,108 @@
 {
   "name": "aura-discord",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.0.1",
+  "description": "Aura — Discord-подобный мессенджер (Electron + React + Firebase + WebRTC)",
+  "author": "Aura Team",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
+    "dev:electron": "concurrently -k -n vite,electron -c blue,magenta \"vite\" \"wait-on http://localhost:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .\"",
     "build": "vite build",
-    "preview": "vite preview"
+    "electron": "electron .",
+    "preview": "vite preview",
+    "pack": "electron-builder --dir",
+    "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "release:win": "npm run dist:win && node scripts/upload-storage.cjs",
+    "release:mac": "npm run dist:mac && node scripts/upload-storage.cjs",
+    "release:linux": "npm run dist:linux && node scripts/upload-storage.cjs"
   },
   "dependencies": {
     "firebase": "^10.12.0",
     "lucide-react": "^0.378.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "@tauri-apps/api": "^2.0.0",
-    "livekit-client": "^2.4.0",
-    "@livekit/components-react": "^2.4.0",
-    "@livekit/components-styles": "^1.0.12",
-    "mediasoup-client": "^3.7.8",
-    "livekit-server-sdk": "^1.2.7"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",
-    "vite": "^5.2.11"
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^32.2.0",
+    "electron-builder": "^25.1.8",
+    "electron-updater": "^6.3.9",
+    "firebase-admin": "^12.7.0",
+    "vite": "^5.2.11",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.aura.discord",
+    "productName": "Aura Discord",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraMetadata": {
+      "main": "electron/main.cjs"
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://storage.googleapis.com/aura-748c8.firebasestorage.app/updates/",
+        "channel": "latest",
+        "useMultipleRangeRequest": false
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Aura Discord"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.social-networking",
+      "icon": "build/icon.icns"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Network",
+      "icon": "build/icon.png"
+    }
   }
 }
